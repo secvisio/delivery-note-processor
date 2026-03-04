@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -e
+
+# Start PHP-FPM in the background
+php-fpm -D
+
+/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+
+if [ ! -L /var/www/public/delivery-notes ]; then
+    ln -s /var/www/storage/delivery-notes /var/www/public/delivery-notes
+fi

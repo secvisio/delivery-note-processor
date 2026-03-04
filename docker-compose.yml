@@ -1,0 +1,81 @@
+networks:
+    delivery_note_processor:
+        external: true
+services:
+    delivery_note_processor_nginx:
+        image: nginx:alpine
+        container_name: delivery_note_processor_nginx
+        restart: unless-stopped
+        tty: true
+        environment:
+            - APP_DOMAIN=${APP_URL}
+        ports:
+            - 443:443
+        volumes:
+            - ./:/var/www
+            - ./docker/nginx/certs:/etc/nginx/certs:ro
+            - ./docker/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf
+        networks:
+            delivery_note_processor:
+                ipv4_address: 172.180.0.2
+    delivery_note_processor_app:
+        build:
+            context: ./docker/php
+        container_name: delivery_note_processor_app
+        restart: unless-stopped
+        tty: true
+        environment:
+            - XDEBUG_CONFIG='${XDEBUG_CONFIG:-client_host=host.docker.internal}'
+        depends_on:
+            - delivery_note_processor_nginx
+        working_dir: /var/www
+        volumes:
+            - ./:/var/www
+            - ./docker/php/local.ini:/usr/local/etc/php/conf.d/local.ini
+            - ./docker/php/opcache.ini:/usr/local/etc/php/conf.d/opcache.ini
+            - ./docker/php/supervisord.conf:/etc/supervisor/conf.d/supervisord.conf
+            - ./docker/php/error_reporting.ini:/usr/local/etc/php/conf.d/error_reporting.ini
+            - ./docker/php/watch-delivery.sh:/usr/local/bin/watch-delivery.sh
+        networks:
+            delivery_note_processor:
+                ipv4_address: 172.180.0.3
+
+    # Redia Master
+    delivery_note_processor_redis:
+        image: redis:alpine
+        container_name: delivery_note_processor_redis
+        restart: unless-stopped
+        ports:
+            - 6379:6379
+        volumes:
+            - ./docker/redis/master-data:/data
+            - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+        command: [ "redis-server", "/usr/local/etc/redis/redis.conf", "--appendonly", "yes" ]
+        networks:
+            delivery_note_processor:
+                ipv4_address: 172.180.0.10
+
+    delivery_note_processor_mailpit:
+        image: axllent/mailpit
+        container_name: delivery_note_processor_mailpit
+        restart: unless-stopped
+        tty: true
+        volumes:
+            - delivery_note_processor_data:/data
+        ports:
+            - 8025:8025
+            - 1025:1025
+        environment:
+            #            MP_UI_AUTH: true
+            #            MP_UI_USER: ${MAIL_USERNAME}
+            #            MP_UI_PASS: ${MAIL_PASSWORD}
+            MP_MAX_MESSAGES: 5000
+            MP_DATABASE: /data/delivery_note_processor_data.db
+            MP_SMTP_AUTH_ACCEPT_ANY: 1
+            MP_SMTP_AUTH_ALLOW_INSECURE: 1
+        networks:
+            delivery_note_processor:
+                ipv4_address: 172.180.0.20
+
+volumes:
+  delivery_note_processor_data:
