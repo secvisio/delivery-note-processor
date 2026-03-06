@@ -5,7 +5,6 @@ networks:
 services:
     delivery_note_processor_nginx:
         image: nginx:alpine
-        container_name: delivery_note_processor_nginx
         restart: unless-stopped
         tty: true
         environment:
@@ -22,7 +21,6 @@ services:
     delivery_note_processor_app:
         build:
             context: ./docker/php
-        container_name: delivery_note_processor_app
         restart: unless-stopped
         tty: true
         environment:
@@ -43,7 +41,6 @@ services:
     # Redia Master
     delivery_note_processor_redis:
         image: redis:alpine
-        container_name: delivery_note_processor_redis
         restart: unless-stopped
         ports:
             - 6379:6379
