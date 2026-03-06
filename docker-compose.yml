@@ -1,6 +1,7 @@
 networks:
     delivery_note_processor:
         driver: bridge
+        name: delivery_note_processor
 services:
     delivery_note_processor_nginx:
         image: nginx:alpine
