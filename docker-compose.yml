@@ -1,16 +1,15 @@
 networks:
     delivery_note_processor:
-        driver: bridge
-        name: delivery_note_processor
+        external: true
 services:
     delivery_note_processor_nginx:
         image: nginx:alpine
+        container_name: delivery_note_processor_nginx
         restart: unless-stopped
         tty: true
         environment:
             - APP_DOMAIN=${APP_URL}
         ports:
-            - 80:80
             - 443:443
         volumes:
             - ./:/var/www
@@ -18,9 +17,11 @@ services:
             - ./docker/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf
         networks:
             delivery_note_processor:
+                ipv4_address: 172.180.0.2
     delivery_note_processor_app:
         build:
             context: ./docker/php
+        container_name: delivery_note_processor_app
         restart: unless-stopped
         tty: true
         environment:
@@ -37,10 +38,12 @@ services:
             - ./docker/php/watch-delivery.sh:/usr/local/bin/watch-delivery.sh
         networks:
             delivery_note_processor:
+                ipv4_address: 172.180.0.3
 
     # Redia Master
     delivery_note_processor_redis:
         image: redis:alpine
+        container_name: delivery_note_processor_redis
         restart: unless-stopped
         ports:
             - 6379:6379
@@ -50,5 +53,6 @@ services:
         command: [ "redis-server", "/usr/local/etc/redis/redis.conf", "--appendonly", "yes" ]
         networks:
             delivery_note_processor:
+                ipv4_address: 172.180.0.10
 volumes:
   delivery_note_processor_data:
