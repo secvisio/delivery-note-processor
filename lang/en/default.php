@@ -7,8 +7,8 @@ return [
     /*
      * translations
      */
-    'unknown_company' => 'unknown_company',
-    'unknown_id' => 'unknown_id',
+    'unknown_company' => 'xxxxxx',
+    'unknown_id' => 'xxxxxx',
     'Upload Delivery-Notes' => 'Upload Delivery-Notes',
     '(PDF or Image File)' => '(PDF or Image File)',
     'Drag & drop files here' => 'unknown_company',
