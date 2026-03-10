@@ -59,7 +59,7 @@ class DeliveryNoteProcessorService
     /**
      * @var float
      */
-    protected float $threshold = 0.6;
+    protected float $threshold = 0.85;
 
     /**
      * @var int
