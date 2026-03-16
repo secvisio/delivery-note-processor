@@ -36,7 +36,6 @@ class ExportDatabase extends Command
         fputcsv($handle, [
             'id',
             'source_file_path',
-            'source_file_hash',
             'source_file_size',
             'source_file_mtime',
             'target_file_path',
