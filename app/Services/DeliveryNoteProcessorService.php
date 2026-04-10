@@ -7,18 +7,20 @@ use App\Jobs\ProcessDeliveryNoteJob;
 use App\Models\Process;
 use App\Neuron\DeliveryNoteAgent;
 use Carbon\Carbon;
+use Exception;
 use Illuminate\Contracts\Filesystem\FileNotFoundException;
 use Illuminate\Contracts\Filesystem\Filesystem;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\UserMessage;
 use Spatie\PdfToImage\Exceptions\PdfDoesNotExist;
-use Symfony\Component\HttpFoundation\File\Exception\FileException;
+use stdClass;
 use thiagoalessio\TesseractOCR\TesseractOCR;
 use thiagoalessio\TesseractOCR\TesseractOcrException;
+use Throwable;
 
 class DeliveryNoteProcessorService
 {
@@ -57,7 +59,7 @@ class DeliveryNoteProcessorService
     /**
      * @var float
      */
-    protected float $threshold = 0.6;
+    protected float $threshold = 0.85;
 
     /**
      * @var int
@@ -79,7 +81,7 @@ class DeliveryNoteProcessorService
      * @throws FileNotFoundException
      * @throws PdfDoesNotExist
      * @throws TesseractOcrException
-     * @throws \Throwable
+     * @throws Throwable
      */
     public function run(Process $process): Process
     {
@@ -98,7 +100,7 @@ class DeliveryNoteProcessorService
             try {
                 $fileConverter = new FileConverterService(config('delivery_note_processor.target_folder'));
                 $fileToProcess = $fileConverter->run($process->source_file_path, 'pdf', 'jpg');
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 $process->update([
                     'status' => 'failed',
                     'failed_message' => $e->getMessage(),
@@ -131,7 +133,7 @@ class DeliveryNoteProcessorService
                     $updatedProcess->source_file_path,
                     config('delivery_note_processor.target_folder') . DIRECTORY_SEPARATOR . $generatedFilename
                 );
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 $updatedProcess->update([
                     'status' => 'failed',
                     'failed_message' => $e->getMessage(),
@@ -152,11 +154,11 @@ class DeliveryNoteProcessorService
      */
     public function getObjectFromContent(mixed $content): ? object
     {
-        if (is_array($content) && $content[0] instanceof \stdClass) {
+        if (is_array($content) && $content[0] instanceof stdClass) {
             return $content[0];
         }
 
-        if ($content instanceof \stdClass) {
+        if ($content instanceof stdClass) {
             return $content;
         }
 
@@ -186,8 +188,8 @@ class DeliveryNoteProcessorService
             $deliveryNote?->percent >= $threshold && null !== $deliveryNote?->id =>
                 $this->generateDeliveryNoteFileName($company->name, $deliveryNote->id, $fileExtension),
 
-            $invoice?->percent >= $threshold && null !== $invoice?->id =>
-                $this->generateInvoiceFileName($company->name, $invoice->id, $fileExtension),
+//            $invoice?->percent >= $threshold && null !== $invoice?->id =>
+//                $this->generateInvoiceFileName($company->name, $invoice->id, $fileExtension),
 
             default => $this->noMatch($fileExtension),
         };
@@ -348,19 +350,19 @@ class DeliveryNoteProcessorService
     private function validateVariables(): bool
     {
         if(null === $this->getSourcePath()) {
-            $e = new \InvalidArgumentException('Source file path is empty.');
+            $e = new InvalidArgumentException('Source file path is empty.');
             Log::error($e ->getMessage());
             throw $e;
         }
 
         if(null === $this->getTargetPath()) {
-            $e = new \InvalidArgumentException('Target file path is empty.');
+            $e = new InvalidArgumentException('Target file path is empty.');
             Log::error($e ->getMessage());
             throw $e;
         }
 
         if($this->getThreshold() <= 0 || $this->getThreshold() > 1) {
-            $e = new \InvalidArgumentException('Threshold must be between 0.1 and 1.');
+            $e = new InvalidArgumentException('Threshold must be between 0.1 and 1.');
             Log::error($e ->getMessage());
             throw $e;
         }
@@ -403,7 +405,7 @@ class DeliveryNoteProcessorService
      * @param string $prompt
      * @param string $ocrContent
      * @return Message
-     * @throws \Throwable
+     * @throws Throwable
      */
     private function runAgent(string $prompt, string $ocrContent): Message
     {

@@ -7,8 +7,8 @@ return [
     /*
      * translations
      */
-    'unknown_company' => 'unbekanntes_unternehmen',
-    'unknown_id' => 'unbekannte_id',
+    'unknown_company' => 'xxxxxx',
+    'unknown_id' => 'xxxxxx',
     'Upload Delivery-Notes' => 'Lieferscheine hochladen',
     '(PDF or Image File)' => '(PDF- oder Bilddatei)',
     'Drag & drop files here' => 'Dateien hierher ziehen & ablegen',

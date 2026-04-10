@@ -10,6 +10,7 @@ services:
         environment:
             - APP_DOMAIN=${APP_URL}
         ports:
+            - 80:80
             - 443:443
         volumes:
             - ./:/var/www
@@ -54,28 +55,5 @@ services:
         networks:
             delivery_note_processor:
                 ipv4_address: 172.180.0.10
-
-    delivery_note_processor_mailpit:
-        image: axllent/mailpit
-        container_name: delivery_note_processor_mailpit
-        restart: unless-stopped
-        tty: true
-        volumes:
-            - delivery_note_processor_data:/data
-        ports:
-            - 8025:8025
-            - 1025:1025
-        environment:
-            #            MP_UI_AUTH: true
-            #            MP_UI_USER: ${MAIL_USERNAME}
-            #            MP_UI_PASS: ${MAIL_PASSWORD}
-            MP_MAX_MESSAGES: 5000
-            MP_DATABASE: /data/delivery_note_processor_data.db
-            MP_SMTP_AUTH_ACCEPT_ANY: 1
-            MP_SMTP_AUTH_ALLOW_INSECURE: 1
-        networks:
-            delivery_note_processor:
-                ipv4_address: 172.180.0.20
-
 volumes:
   delivery_note_processor_data:
