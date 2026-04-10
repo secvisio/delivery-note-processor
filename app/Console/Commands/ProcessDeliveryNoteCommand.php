@@ -2,14 +2,13 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Process;
 use App\Services\DeliveryNoteProcessorService;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Filesystem\FileNotFoundException;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Spatie\PdfToImage\Exceptions\PdfDoesNotExist;
 use thiagoalessio\TesseractOCR\TesseractOcrException;
+use Throwable;
 
 class ProcessDeliveryNoteCommand extends Command
 {
@@ -30,12 +29,12 @@ class ProcessDeliveryNoteCommand extends Command
     /**
      * @return void
      * @throws PdfDoesNotExist
-     * @throws \Throwable
+     * @throws Throwable
      * @throws TesseractOcrException
      */
     public function handle(): void
     {
-        $sourceFile = 'source/Werkstatt_RueckLieferschein_Standard_01_Vorschau.png';
+        $sourceFile = 'source/example_invoice_1.png';
         $targetPath = 'target';
 
         $processor = new DeliveryNoteProcessorService();
