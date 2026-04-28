@@ -129,9 +129,16 @@ class DeliveryNoteProcessorService
             $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
 
             try {
+
+                $saveToFolder = config('delivery_note_processor.target_folder');
+
+                if (str_contains($generatedFilename, __('default.unknown_company')) || str_contains($generatedFilename, __('default.unknown_id'))) {
+                    $saveToFolder = config('delivery_note_processor.unknown_folder');
+                }
+
                 $this->disk->copy(
                     $updatedProcess->source_file_path,
-                    config('delivery_note_processor.target_folder') . DIRECTORY_SEPARATOR . $generatedFilename
+                    $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename
                 );
             } catch (Exception $e) {
                 $updatedProcess->update([
