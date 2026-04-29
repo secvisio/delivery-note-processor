@@ -23,49 +23,11 @@ class ProcessFile extends Command
      */
     protected $description = 'Listen to a given directory for arriving files';
 
-    public function handle()
-    {
-        $filename = $this->argument('filename');
-
-        $sourcePath = '/var/www/delivery-note-processor/storage/delivery-notes/source'
-            . DIRECTORY_SEPARATOR
-            . $filename;
-
-        $targetPath = '/mnt/laufwerk/ScannerOriginale/' . $filename;
-
-        if (!file_exists($sourcePath)) {
-            $message = 'Watcher error: ' . $sourcePath . ' does not exist';
-
-            Log::error('WatchDirectory failed', [
-                'exception' => $message,
-            ]);
-
-            return;
-        }
-
-        if (!copy($sourcePath, $targetPath)) {
-            Log::error('Failed to copy file to scanner directory', [
-                'source' => $sourcePath,
-                'target' => $targetPath,
-            ]);
-
-            return;
-        }
-
-        $hash = hash_file('sha256', $targetPath);
-        $fileSize = filesize($targetPath);
-
-        $deliveryNoteProcessorService = new DeliveryNoteProcessorService();
-        $deliveryNoteProcessorService->fileArrived($targetPath, $hash, $fileSize);
-
-        $this->info('Send file ' . $targetPath . ' to DeliveryNoteProcessorService for further processing');
-    }
-
 
     /**
      * @return void
      */
-    public function dontHandle(): void
+    public function handle(): void
     {
 
         $filename = $this->argument('filename');
