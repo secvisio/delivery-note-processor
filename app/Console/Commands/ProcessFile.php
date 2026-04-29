@@ -31,6 +31,8 @@ class ProcessFile extends Command
             . DIRECTORY_SEPARATOR
             . $filename;
 
+        $targetPath = '/mnt/laufwerk/ScannerOriginale/' . $filename;
+
         if (!file_exists($sourcePath)) {
             $message = 'Watcher error: ' . $sourcePath . ' does not exist';
 
@@ -41,13 +43,22 @@ class ProcessFile extends Command
             return;
         }
 
-        $hash = hash_file('sha256', $sourcePath);
-        $fileSize = filesize($sourcePath);
+        if (!copy($sourcePath, $targetPath)) {
+            Log::error('Failed to copy file to scanner directory', [
+                'source' => $sourcePath,
+                'target' => $targetPath,
+            ]);
+
+            return;
+        }
+
+        $hash = hash_file('sha256', $targetPath);
+        $fileSize = filesize($targetPath);
 
         $deliveryNoteProcessorService = new DeliveryNoteProcessorService();
-        $deliveryNoteProcessorService->fileArrived($sourcePath, $hash, $fileSize);
+        $deliveryNoteProcessorService->fileArrived($targetPath, $hash, $fileSize);
 
-        $this->info('Send file ' . $sourcePath . ' to DeliveryNoteProcessorService for further processing');
+        $this->info('Send file ' . $targetPath . ' to DeliveryNoteProcessorService for further processing');
     }
 
 
