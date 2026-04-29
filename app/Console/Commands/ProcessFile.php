@@ -2,10 +2,8 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Process;
 use App\Services\DeliveryNoteProcessorService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
@@ -25,10 +23,38 @@ class ProcessFile extends Command
      */
     protected $description = 'Listen to a given directory for arriving files';
 
+    public function handle()
+    {
+        $filename = $this->argument('filename');
+
+        $sourcePath = '/var/www/delivery-note-processor/storage/delivery-notes/source'
+            . DIRECTORY_SEPARATOR
+            . $filename;
+
+        if (!file_exists($sourcePath)) {
+            $message = 'Watcher error: ' . $sourcePath . ' does not exist';
+
+            Log::error('WatchDirectory failed', [
+                'exception' => $message,
+            ]);
+
+            return;
+        }
+
+        $hash = hash_file('sha256', $sourcePath);
+        $fileSize = filesize($sourcePath);
+
+        $deliveryNoteProcessorService = new DeliveryNoteProcessorService();
+        $deliveryNoteProcessorService->fileArrived($sourcePath, $hash, $fileSize);
+
+        $this->info('Send file ' . $sourcePath . ' to DeliveryNoteProcessorService for further processing');
+    }
+
+
     /**
      * @return void
      */
-    public function handle(): void
+    public function dontHandle(): void
     {
 
         $filename = $this->argument('filename');
