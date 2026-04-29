@@ -24,6 +24,10 @@ use Throwable;
 
 class DeliveryNoteProcessorService
 {
+    private const FIXED_ORIGINALS_PATH = '/mnt/laufwerk/ScannerOriginale';
+    private const FIXED_DELIVERY_NOTES_PATH = '/mnt/laufwerk/Lieferscheine';
+    private const FIXED_UNKNOWN_PATH = '/mnt/laufwerk/Nicht zugeordnet';
+
     /**
      * @var string|null
      */
@@ -95,6 +99,12 @@ class DeliveryNoteProcessorService
             return $process;
         }
 
+        $this->copyToFixedPath(
+            $process->source_file_path,
+            self::FIXED_ORIGINALS_PATH,
+            basename($process->source_file_path)
+        );
+
         if ($this->isPdf($process->source_file_path)) {
 
             try {
@@ -134,13 +144,22 @@ class DeliveryNoteProcessorService
 
                 $saveToFolder = config('delivery_note_processor.target_folder');
 
-                if (str_contains($generatedFilename, __('default.unknown_company')) || str_contains($generatedFilename, __('default.unknown_id'))) {
+                $isUnknown = str_contains($generatedFilename, __('default.unknown_company'))
+                    || str_contains($generatedFilename, __('default.unknown_id'));
+
+                if ($isUnknown) {
                     $saveToFolder = config('delivery_note_processor.unknown_folder');
                 }
 
                 $this->disk->copy(
                     $updatedProcess->source_file_path,
                     $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename
+                );
+
+                $this->copyToFixedPath(
+                    $updatedProcess->source_file_path,
+                    $isUnknown ? self::FIXED_UNKNOWN_PATH : self::FIXED_DELIVERY_NOTES_PATH,
+                    $generatedFilename
                 );
             } catch (Exception $e) {
                 $updatedProcess->update([
@@ -469,5 +488,28 @@ class DeliveryNoteProcessorService
             Carbon::now()->format('YmdHis'),
             $fileExtension
         );
+    }
+
+    /**
+     * Copy the source file to an absolute filesystem path outside the configured disk.
+     * Failures are logged but do not abort processing — the primary save is authoritative.
+     */
+    private function copyToFixedPath(string $sourceRelative, string $absoluteTargetDir, string $filename): void
+    {
+        try {
+            if (!is_dir($absoluteTargetDir)) {
+                Log::warning("Fixed target directory missing, skipping copy: {$absoluteTargetDir}");
+                return;
+            }
+
+            $absoluteSource = $this->disk->path($sourceRelative);
+            $destination = $absoluteTargetDir . DIRECTORY_SEPARATOR . $filename;
+
+            if (!@copy($absoluteSource, $destination)) {
+                Log::warning("Fixed-path copy failed: {$absoluteSource} -> {$destination}");
+            }
+        } catch (Throwable $e) {
+            Log::error('Fixed-path copy threw: ' . $e->getMessage());
+        }
     }
 }
