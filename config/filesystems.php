@@ -62,8 +62,8 @@ return [
 
         'delivery_notes' => [
             'driver' => 'local',
-//            'url' => rtrim(env('APP_URL'), '/').'/delivery-notes/',
-            'root' => env('DISK_ROOT', storage_path('delivery-notes')), // /mnt/laufwerk/
+            'url' => rtrim(env('APP_URL'), '/') . '/delivery-notes/',
+            'root' => storage_path('delivery-notes'),
             'visibility' => 'public',
         ],
     ],
