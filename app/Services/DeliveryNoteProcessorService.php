@@ -107,6 +107,8 @@ class DeliveryNoteProcessorService
                     'failed_trace' => $e->getTraceAsString(),
                 ]);
 
+                Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
+
                 return $process;
             }
 
@@ -146,6 +148,8 @@ class DeliveryNoteProcessorService
                     'failed_message' => $e->getMessage(),
                     'failed_trace' => $e->getTraceAsString(),
                 ]);
+
+                Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
             }
 
             return $updatedProcess;

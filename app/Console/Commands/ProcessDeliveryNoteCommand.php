@@ -45,7 +45,7 @@ class ProcessDeliveryNoteCommand extends Command
             $process = $processor->run();
             dump($process);
         } catch (FileNotFoundException $e) {
-            Log::error($e->getMessage());
+            Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
         }
     }
 

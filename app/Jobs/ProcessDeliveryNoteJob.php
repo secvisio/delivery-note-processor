@@ -9,7 +9,8 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class ProcessDeliveryNoteJob implements ShouldQueue
 {
@@ -24,7 +25,7 @@ class ProcessDeliveryNoteJob implements ShouldQueue
 
     /**
      * @return void
-     * @throws \Throwable
+     * @throws Throwable
      */
     public function handle(): void
     {
@@ -40,12 +41,14 @@ class ProcessDeliveryNoteJob implements ShouldQueue
                 ->setTargetPath(config('delivery_note_processor.target_folder'))
                 ->run($process);
 
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             $process->update([
                 'status' => 'failed',
                 'failed_message' => $e->getMessage(),
                 'failed_trace' => $e->getTraceAsString(),
             ]);
+
+            Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
 
         }
     }
