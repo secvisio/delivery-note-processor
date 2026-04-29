@@ -18,8 +18,10 @@ use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\UserMessage;
 use Spatie\PdfToImage\Exceptions\PdfDoesNotExist;
 use stdClass;
-use thiagoalessio\TesseractOCR\TesseractOCR;
+use Symfony\Component\Process\Exception\ProcessTimedOutException;
+use Symfony\Component\Process\Process as SymfonyProcess;
 use thiagoalessio\TesseractOCR\TesseractOcrException;
+use thiagoalessio\TesseractOCR\UnsuccessfulCommandException;
 use Throwable;
 
 class DeliveryNoteProcessorService
@@ -69,6 +71,13 @@ class DeliveryNoteProcessorService
      * @var int
      */
     protected int $maxOcrChatToSave = 16383;
+
+    /**
+     * Hard cap on Tesseract runtime, in seconds. Must be strictly less than
+     * ProcessDeliveryNoteJob::$timeout (worker timeout) which itself must be
+     * strictly less than the queue's retry_after.
+     */
+    private const TESSERACT_TIMEOUT_SECONDS = 120;
 
     /**
      * @var Filesystem
@@ -420,15 +429,34 @@ class DeliveryNoteProcessorService
     }
 
     /**
-     * @param string $imageFile
-     * @return string
+     * Run Tesseract via Symfony Process so the timeout is actually enforced
+     * (the bundled tesseract_ocr library exits its wait loop on timeout but
+     * never reaps the child — Symfony Process sends SIGTERM/SIGKILL).
+     *
      * @throws TesseractOcrException
      */
     private function runOCR(string $imageFile): string
     {
         $absolutePath = $this->disk->path($imageFile);
-        $tesseractOcr = new TesseractOCR($absolutePath);
-        return $tesseractOcr->run();
+
+        $process = new SymfonyProcess(['tesseract', $absolutePath, '-']);
+        $process->setTimeout(self::TESSERACT_TIMEOUT_SECONDS);
+
+        try {
+            $process->run();
+        } catch (ProcessTimedOutException $e) {
+            throw new UnsuccessfulCommandException(
+                "Tesseract OCR timed out after " . self::TESSERACT_TIMEOUT_SECONDS . "s for {$absolutePath}"
+            );
+        }
+
+        if (!$process->isSuccessful()) {
+            throw new UnsuccessfulCommandException(
+                "Tesseract OCR failed (exit {$process->getExitCode()}): " . trim($process->getErrorOutput())
+            );
+        }
+
+        return trim($process->getOutput());
     }
 
     /**
