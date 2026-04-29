@@ -230,7 +230,7 @@ class DeliveryNoteProcessorService
 //            $invoice?->percent >= $threshold && null !== $invoice?->id =>
 //                $this->generateInvoiceFileName($company->name, $invoice->id, $fileExtension),
 
-            default => $this->noMatch($fileExtension),
+            default => $this->noMatch($company->name, $fileExtension),
         };
 
     }
@@ -480,9 +480,9 @@ class DeliveryNoteProcessorService
     private function generateDeliveryNoteFileName(string $companyName, string $deliveryNoteId, string $fileExtension): string
     {
         return sprintf(
-            '%s_ls_%s.%s',
-            Str::snake(Str::lower($companyName)),
+            'ls_%s_%s.%s',
             Str::snake(Str::lower($deliveryNoteId)),
+            Str::snake(Str::lower($companyName)),
             $fileExtension
         );
     }
@@ -504,15 +504,18 @@ class DeliveryNoteProcessorService
     }
 
     /**
-     * @param string $fileExtension
-     * @return string
+     * Fallback filename when the delivery-note id could not be extracted with
+     * sufficient confidence. Follows the same `ls_<id>_<company>` pattern as
+     * the success path, with the unknown-id placeholder substituted in. The
+     * trailing timestamp preserves filename uniqueness so two unrecognized
+     * scans for the same company do not overwrite each other on disk.
      */
-    private function noMatch(string $fileExtension): string
+    private function noMatch(string $companyName, string $fileExtension): string
     {
         return sprintf(
-            '%s_%s_%s.%s',
-            __('default.unknown_company'),
+            'ls_%s_%s_%s.%s',
             __('default.unknown_id'),
+            Str::snake(Str::lower($companyName)),
             Carbon::now()->format('YmdHis'),
             $fileExtension
         );
