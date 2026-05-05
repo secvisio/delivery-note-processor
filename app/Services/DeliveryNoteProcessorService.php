@@ -6,7 +6,6 @@ namespace App\Services;
 use App\Jobs\ProcessDeliveryNoteJob;
 use App\Models\Process;
 use App\Neuron\DeliveryNoteAgent;
-use Carbon\Carbon;
 use Exception;
 use Illuminate\Contracts\Filesystem\FileNotFoundException;
 use Illuminate\Contracts\Filesystem\Filesystem;
@@ -145,20 +144,17 @@ class DeliveryNoteProcessorService
             $message = $this->runAgent($this->getAgentPrompt(), $ocrContent);
             $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
 
-            $generatedFilename = $this->generateFilename($process, $messageContent, $this->getThreshold());
+            $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
+            $generatedFilename = FilenameGenerator::generate($filenameData);
+            $isUnknown = FilenameGenerator::isFallback($filenameData);
 
             $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
 
             try {
 
-                $saveToFolder = config('delivery_note_processor.target_folder');
-
-                $isUnknown = str_contains($generatedFilename, __('default.unknown_company'))
-                    || str_contains($generatedFilename, __('default.unknown_id'));
-
-                if ($isUnknown) {
-                    $saveToFolder = config('delivery_note_processor.unknown_folder');
-                }
+                $saveToFolder = $isUnknown
+                    ? config('delivery_note_processor.unknown_folder')
+                    : config('delivery_note_processor.target_folder');
 
                 $this->disk->copy(
                     $updatedProcess->source_file_path,
@@ -212,29 +208,29 @@ class DeliveryNoteProcessorService
      */
     public function generateFilename(Process $process, object $messageContent, float $threshold): string
     {
+        return FilenameGenerator::generate($this->buildFilenameData($process, $messageContent, $threshold));
+    }
 
-        $fileExtension = $this->sanitizeExtension(
-            Str::afterLast($process->source_file_path, '.')
-        );
+    /**
+     * Build the deterministic input array for FilenameGenerator. The
+     * threshold gates what counts as "present": an id or company below
+     * the certainty threshold is treated as missing. The fallback token
+     * is the source-file hash, which is stable per input file.
+     */
+    private function buildFilenameData(Process $process, object $messageContent, float $threshold): array
+    {
+        $company = $messageContent->company ?? null;
+        $deliveryNote = $messageContent->deliveryNote ?? null;
 
-        $company = $messageContent->company;
-        $deliveryNote = $messageContent->deliveryNote;
-        $invoice = $messageContent->invoice;
+        $companyName = ($company?->percent >= $threshold) ? ($company->name ?? null) : null;
+        $deliveryNoteId = ($deliveryNote?->percent >= $threshold) ? ($deliveryNote->id ?? null) : null;
 
-        if ($company?->percent < $threshold || null === $company?->name) {
-            $company->name = __('default.unknown_company');
-        }
-
-        return match (true) {
-            $deliveryNote?->percent >= $threshold && null !== $deliveryNote?->id =>
-                $this->generateDeliveryNoteFileName($company->name, $deliveryNote->id, $fileExtension),
-
-//            $invoice?->percent >= $threshold && null !== $invoice?->id =>
-//                $this->generateInvoiceFileName($company->name, $invoice->id, $fileExtension),
-
-            default => $this->noMatch($company->name, $fileExtension),
-        };
-
+        return [
+            'delivery_note_id' => $deliveryNoteId,
+            'company_name' => $companyName,
+            'extension' => Str::afterLast($process->source_file_path, '.'),
+            'fallback_token' => $process->source_file_hash,
+        ];
     }
 
     /**
@@ -471,88 +467,6 @@ class DeliveryNoteProcessorService
     {
         $prompt = str_replace('{{ $ocrContent }}', $ocrContent, $prompt);
         return DeliveryNoteAgent::make()->chat(new UserMessage($prompt));
-    }
-
-    /**
-     * @param string $companyName
-     * @param string $deliveryNoteId
-     * @param string $fileExtension
-     * @return string
-     */
-    private function generateDeliveryNoteFileName(string $companyName, string $deliveryNoteId, string $fileExtension): string
-    {
-        return sprintf(
-            'ls_%s_%s.%s',
-            $this->sanitizeFilenameSegment($deliveryNoteId),
-            $this->sanitizeFilenameSegment($companyName),
-            $fileExtension
-        );
-    }
-
-    /**
-     * @param string $companyName
-     * @param string $invoiceId
-     * @param string $fileExtension
-     * @return string
-     */
-    private function generateInvoiceFileName(string $companyName, string $invoiceId, string $fileExtension): string
-    {
-        return sprintf(
-            '%s_re_%s.%s',
-            $this->sanitizeFilenameSegment($companyName),
-            $this->sanitizeFilenameSegment($invoiceId),
-            $fileExtension
-        );
-    }
-
-    /**
-     * Fallback filename when the delivery-note id could not be extracted with
-     * sufficient confidence. Follows the same `ls_<id>_<company>` pattern as
-     * the success path, with the unknown-id placeholder substituted in. The
-     * trailing timestamp preserves filename uniqueness so two unrecognized
-     * scans for the same company do not overwrite each other on disk.
-     */
-    private function noMatch(string $companyName, string $fileExtension): string
-    {
-        return sprintf(
-            'ls_%s_%s_%s.%s',
-            __('default.unknown_id'),
-            $this->sanitizeFilenameSegment($companyName),
-            Carbon::now()->format('YmdHis'),
-            $fileExtension
-        );
-    }
-
-    /**
-     * Make a single filename segment safe across Linux/Windows/SMB targets.
-     * ASCII-folds (ä→a, ß→ss, é→e), lowercases, replaces every non-[a-z0-9]
-     * with `_`, collapses runs, trims edges. Path separators (/, \) and
-     * Windows-reserved chars (:*?"<>|) all get folded to `_` here — that is
-     * what prevents company names like "A/S" from breaking the target path.
-     */
-    private function sanitizeFilenameSegment(?string $value): string
-    {
-        $value = (string)$value;
-        $value = Str::ascii($value);
-        $value = Str::lower($value);
-        $value = preg_replace('/[^a-z0-9]+/', '_', $value);
-        $value = trim((string)$value, '_');
-
-        return $value === '' ? 'x' : $value;
-    }
-
-    /**
-     * Restrict the extension to a known whitelist so a hostile or malformed
-     * source filename cannot smuggle in '.php', '..', empty, or mixed-case
-     * extensions on the way to the target folder.
-     */
-    private function sanitizeExtension(?string $extension): string
-    {
-        $extension = Str::lower((string)$extension);
-
-        return in_array($extension, ['pdf', 'jpg', 'jpeg', 'png', 'tif', 'tiff'], true)
-            ? $extension
-            : 'pdf';
     }
 
     /**
