@@ -213,7 +213,9 @@ class DeliveryNoteProcessorService
     public function generateFilename(Process $process, object $messageContent, float $threshold): string
     {
 
-        $fileExtension = Str::afterLast($process->source_file_path, '.');
+        $fileExtension = $this->sanitizeExtension(
+            Str::afterLast($process->source_file_path, '.')
+        );
 
         $company = $messageContent->company;
         $deliveryNote = $messageContent->deliveryNote;
@@ -481,8 +483,8 @@ class DeliveryNoteProcessorService
     {
         return sprintf(
             'ls_%s_%s.%s',
-            Str::snake(Str::lower($deliveryNoteId)),
-            Str::snake(Str::lower($companyName)),
+            $this->sanitizeFilenameSegment($deliveryNoteId),
+            $this->sanitizeFilenameSegment($companyName),
             $fileExtension
         );
     }
@@ -497,8 +499,8 @@ class DeliveryNoteProcessorService
     {
         return sprintf(
             '%s_re_%s.%s',
-            Str::snake(Str::lower($companyName)),
-            Str::snake(Str::lower($invoiceId)),
+            $this->sanitizeFilenameSegment($companyName),
+            $this->sanitizeFilenameSegment($invoiceId),
             $fileExtension
         );
     }
@@ -515,10 +517,42 @@ class DeliveryNoteProcessorService
         return sprintf(
             'ls_%s_%s_%s.%s',
             __('default.unknown_id'),
-            Str::snake(Str::lower($companyName)),
+            $this->sanitizeFilenameSegment($companyName),
             Carbon::now()->format('YmdHis'),
             $fileExtension
         );
+    }
+
+    /**
+     * Make a single filename segment safe across Linux/Windows/SMB targets.
+     * ASCII-folds (ä→a, ß→ss, é→e), lowercases, replaces every non-[a-z0-9]
+     * with `_`, collapses runs, trims edges. Path separators (/, \) and
+     * Windows-reserved chars (:*?"<>|) all get folded to `_` here — that is
+     * what prevents company names like "A/S" from breaking the target path.
+     */
+    private function sanitizeFilenameSegment(?string $value): string
+    {
+        $value = (string)$value;
+        $value = Str::ascii($value);
+        $value = Str::lower($value);
+        $value = preg_replace('/[^a-z0-9]+/', '_', $value);
+        $value = trim((string)$value, '_');
+
+        return $value === '' ? 'x' : $value;
+    }
+
+    /**
+     * Restrict the extension to a known whitelist so a hostile or malformed
+     * source filename cannot smuggle in '.php', '..', empty, or mixed-case
+     * extensions on the way to the target folder.
+     */
+    private function sanitizeExtension(?string $extension): string
+    {
+        $extension = Str::lower((string)$extension);
+
+        return in_array($extension, ['pdf', 'jpg', 'jpeg', 'png', 'tif', 'tiff'], true)
+            ? $extension
+            : 'pdf';
     }
 
     /**
