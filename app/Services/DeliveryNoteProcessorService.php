@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Jobs\ProcessDeliveryNoteJob;
 use App\Models\Process;
 use App\Neuron\DeliveryNoteAgent;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Contracts\Filesystem\FileNotFoundException;
 use Illuminate\Contracts\Filesystem\Filesystem;
@@ -145,8 +146,8 @@ class DeliveryNoteProcessorService
             $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
 
             $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
-            $generatedFilename = FilenameGenerator::generate($filenameData);
-            $isUnknown = FilenameGenerator::isFallback($filenameData);
+            $generatedFilename = FileRenamingService::generate($filenameData);
+            $isUnknown = FileRenamingService::isFallback($filenameData);
 
             $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
 
@@ -208,14 +209,15 @@ class DeliveryNoteProcessorService
      */
     public function generateFilename(Process $process, object $messageContent, float $threshold): string
     {
-        return FilenameGenerator::generate($this->buildFilenameData($process, $messageContent, $threshold));
+        return FileRenamingService::generate($this->buildFilenameData($process, $messageContent, $threshold));
     }
 
     /**
-     * Build the deterministic input array for FilenameGenerator. The
-     * threshold gates what counts as "present": an id or company below
-     * the certainty threshold is treated as missing. The fallback token
-     * is the source-file hash, which is stable per input file.
+     * Build the input array for FileRenamingService. The threshold gates
+     * what counts as "present": an id or company below the certainty
+     * threshold is treated as missing, which forces the corresponding
+     * segment to the literal `xxxxxx` placeholder and triggers the
+     * uniqueness timestamp.
      */
     private function buildFilenameData(Process $process, object $messageContent, float $threshold): array
     {
@@ -229,7 +231,7 @@ class DeliveryNoteProcessorService
             'delivery_note_id' => $deliveryNoteId,
             'company_name' => $companyName,
             'extension' => Str::afterLast($process->source_file_path, '.'),
-            'fallback_token' => $process->source_file_hash,
+            'timestamp' => Carbon::now()->format('YmdHis'),
         ];
     }
 

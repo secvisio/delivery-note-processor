@@ -13,31 +13,27 @@ use Illuminate\Support\Str;
  */
 final class FilenameNormalizer
 {
+    public const FALLBACK_TOKEN = 'xxxxxx';
+
     private const MAX_SEGMENT_LENGTH = 80;
 
     private const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png', 'tif', 'tiff'];
 
     /**
-     * Normalize a company name into a filename-safe segment.
+     * Normalize a company name into a filename-safe segment using a
+     * URL-style slug (lowercase, hyphen-separated, ASCII-folded).
      *
-     * Rules:
-     *  1. Unicode → ASCII (ä→a, ß→ss, é→e, ø→o).
-     *  2. Lowercase.
-     *  3. Remove `/` and `\` outright (no separator inserted) so that
-     *     short legal-form tokens like "A/S" stay readable as "as" AND
-     *     no path separator can ever leak through into a filename.
-     *  4. Replace every other non-alphanumeric run with `_`.
-     *  5. Collapse repeats, trim leading/trailing `_`.
-     *  6. Hard-cap byte length so the final filename stays well under
-     *     the 255-byte limit imposed by ext4/NTFS/SMB.
+     * Pre-processing replaces `/`, `\`, and `.` with spaces so abbreviations
+     * like "A/S" round-trip as "a-s" instead of collapsing to "as", and so
+     * a hostile `../../etc/passwd` cannot cross-contaminate adjacent tokens.
+     * Everything else goes through Str::slug, which strips remaining
+     * non-alphanumerics and trims edge separators.
      */
     public static function sanitizeCompanyName(?string $name): string
     {
-        $value = Str::ascii((string)$name);
-        $value = Str::lower($value);
-        $value = str_replace(['/', '\\'], '', $value);
-        $value = preg_replace('/[^a-z0-9]+/', '_', $value);
-        $value = trim((string)$value, '_');
+        $value = (string)$name;
+        $value = str_replace(['/', '\\', '.'], ' ', $value);
+        $value = Str::slug($value, '-');
 
         return self::cap($value);
     }
@@ -45,7 +41,7 @@ final class FilenameNormalizer
     /**
      * Normalize a delivery-note or invoice id. Stricter than company-name
      * sanitization: the id must read as a single token, so non-alphanumeric
-     * characters are stripped (not replaced with `_`).
+     * characters are stripped (not replaced with a separator).
      */
     public static function sanitizeIdentifier(?string $id): string
     {
@@ -75,6 +71,6 @@ final class FilenameNormalizer
             return $value;
         }
 
-        return rtrim(substr($value, 0, self::MAX_SEGMENT_LENGTH), '_');
+        return rtrim(substr($value, 0, self::MAX_SEGMENT_LENGTH), '-');
     }
 }
