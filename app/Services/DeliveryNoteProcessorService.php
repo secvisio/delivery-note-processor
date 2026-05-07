@@ -145,20 +145,17 @@ class DeliveryNoteProcessorService
             $message = $this->runAgent($this->getAgentPrompt(), $ocrContent);
             $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
 
-            $generatedFilename = $this->generateFilename($process, $messageContent, $this->getThreshold());
+            $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
+            $generatedFilename = FileRenamingService::generate($filenameData);
+            $isUnknown = FileRenamingService::isFallback($filenameData);
 
             $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
 
             try {
 
-                $saveToFolder = config('delivery_note_processor.target_folder');
-
-                $isUnknown = str_contains($generatedFilename, __('default.unknown_company'))
-                    || str_contains($generatedFilename, __('default.unknown_id'));
-
-                if ($isUnknown) {
-                    $saveToFolder = config('delivery_note_processor.unknown_folder');
-                }
+                $saveToFolder = $isUnknown
+                    ? config('delivery_note_processor.unknown_folder')
+                    : config('delivery_note_processor.target_folder');
 
                 $this->disk->copy(
                     $updatedProcess->source_file_path,
@@ -212,27 +209,30 @@ class DeliveryNoteProcessorService
      */
     public function generateFilename(Process $process, object $messageContent, float $threshold): string
     {
+        return FileRenamingService::generate($this->buildFilenameData($process, $messageContent, $threshold));
+    }
 
-        $fileExtension = Str::afterLast($process->source_file_path, '.');
+    /**
+     * Build the input array for FileRenamingService. The threshold gates
+     * what counts as "present": an id or company below the certainty
+     * threshold is treated as missing, which forces the corresponding
+     * segment to the literal `xxxxxx` placeholder and triggers the
+     * uniqueness timestamp.
+     */
+    private function buildFilenameData(Process $process, object $messageContent, float $threshold): array
+    {
+        $company = $messageContent->company ?? null;
+        $deliveryNote = $messageContent->deliveryNote ?? null;
 
-        $company = $messageContent->company;
-        $deliveryNote = $messageContent->deliveryNote;
-        $invoice = $messageContent->invoice;
+        $companyName = ($company?->percent >= $threshold) ? ($company->name ?? null) : null;
+        $deliveryNoteId = ($deliveryNote?->percent >= $threshold) ? ($deliveryNote->id ?? null) : null;
 
-        if ($company?->percent < $threshold || null === $company?->name) {
-            $company->name = __('default.unknown_company');
-        }
-
-        return match (true) {
-            $deliveryNote?->percent >= $threshold && null !== $deliveryNote?->id =>
-                $this->generateDeliveryNoteFileName($company->name, $deliveryNote->id, $fileExtension),
-
-//            $invoice?->percent >= $threshold && null !== $invoice?->id =>
-//                $this->generateInvoiceFileName($company->name, $invoice->id, $fileExtension),
-
-            default => $this->noMatch($company->name, $fileExtension),
-        };
-
+        return [
+            'delivery_note_id' => $deliveryNoteId,
+            'company_name' => $companyName,
+            'extension' => Str::afterLast($process->source_file_path, '.'),
+            'timestamp' => Carbon::now()->format('YmdHis'),
+        ];
     }
 
     /**
@@ -469,56 +469,6 @@ class DeliveryNoteProcessorService
     {
         $prompt = str_replace('{{ $ocrContent }}', $ocrContent, $prompt);
         return DeliveryNoteAgent::make()->chat(new UserMessage($prompt));
-    }
-
-    /**
-     * @param string $companyName
-     * @param string $deliveryNoteId
-     * @param string $fileExtension
-     * @return string
-     */
-    private function generateDeliveryNoteFileName(string $companyName, string $deliveryNoteId, string $fileExtension): string
-    {
-        return sprintf(
-            'ls_%s_%s.%s',
-            Str::snake(Str::lower($deliveryNoteId)),
-            Str::snake(Str::lower($companyName)),
-            $fileExtension
-        );
-    }
-
-    /**
-     * @param string $companyName
-     * @param string $invoiceId
-     * @param string $fileExtension
-     * @return string
-     */
-    private function generateInvoiceFileName(string $companyName, string $invoiceId, string $fileExtension): string
-    {
-        return sprintf(
-            '%s_re_%s.%s',
-            Str::snake(Str::lower($companyName)),
-            Str::snake(Str::lower($invoiceId)),
-            $fileExtension
-        );
-    }
-
-    /**
-     * Fallback filename when the delivery-note id could not be extracted with
-     * sufficient confidence. Follows the same `ls_<id>_<company>` pattern as
-     * the success path, with the unknown-id placeholder substituted in. The
-     * trailing timestamp preserves filename uniqueness so two unrecognized
-     * scans for the same company do not overwrite each other on disk.
-     */
-    private function noMatch(string $companyName, string $fileExtension): string
-    {
-        return sprintf(
-            'ls_%s_%s_%s.%s',
-            __('default.unknown_id'),
-            Str::snake(Str::lower($companyName)),
-            Carbon::now()->format('YmdHis'),
-            $fileExtension
-        );
     }
 
     /**
