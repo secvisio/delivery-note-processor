@@ -36,6 +36,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Where to save renamed production-order files
+    |--------------------------------------------------------------------------
+    |
+    | Files identified as production orders ("Produktionsaufträge") are
+    | routed here instead of the delivery-note target folder.
+    |
+    */
+
+    'production_order_folder' => env('PRODUCT_ORDERS_TARGET_FOLDER', 'Produktionsaufträge'),
+
+    /*
+    |--------------------------------------------------------------------------
     | The disk name of saved files
     |--------------------------------------------------------------------------
     |

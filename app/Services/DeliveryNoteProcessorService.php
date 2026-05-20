@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Jobs\ProcessDeliveryNoteJob;
 use App\Models\Process;
 use App\Neuron\DeliveryNoteAgent;
+use App\Neuron\ProductionOrderAgent;
 use Carbon\Carbon;
 use Exception;
 use Illuminate\Contracts\Filesystem\FileNotFoundException;
@@ -14,6 +15,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use NeuronAI\Agent;
 use NeuronAI\Chat\Messages\Message;
 use NeuronAI\Chat\Messages\UserMessage;
 use Spatie\PdfToImage\Exceptions\PdfDoesNotExist;
@@ -29,6 +31,7 @@ class DeliveryNoteProcessorService
     private const FIXED_ORIGINALS_PATH = '/mnt/laufwerk/ScannerOriginale';
     private const FIXED_DELIVERY_NOTES_PATH = '/mnt/laufwerk/Lieferscheine';
     private const FIXED_UNKNOWN_PATH = '/mnt/laufwerk/Nicht zugeordnet';
+    private const FIXED_PRODUCTION_ORDERS_PATH = '/mnt/laufwerk/Produktionsaufträge';
 
     /**
      * @var string|null
@@ -58,6 +61,52 @@ class DeliveryNoteProcessorService
 
             set the value to `null` for things you couldn\'t find. do not add any other comments, descriptions or
             whatsoever to the output. Following you\'ll find the content scanned by ocr scanner:
+
+            {{ $ocrContent }}
+        ';
+
+    /**
+     * Prompt for the production-order extraction agent. Two independent
+     * decisions: (1) IS this a production order? (2) which of the two
+     * header values could be extracted? Missing values must come back as
+     * null — the agent must NOT invent numbers. The processor compares
+     * is_production_order against the OCR content; if true, the file is
+     * routed to the Produktionsaufträge folder regardless of how many
+     * values were extractable.
+     *
+     * @var string
+     */
+    protected string $productionOrderPrompt = '
+            You will receive plain text parsed by an OCR scanner from a scanned document.
+
+            Decide independently:
+              (1) whether the document is a production order ("Produktionsauftrag")
+              (2) which of two values, if any, can be reliably extracted
+
+            The two values typically appear near the TOP of the document, inside the first
+            header table:
+              - Auftrag (Auftragsnummer)
+              - Produktion (Produktionsnummer)
+
+            Rules:
+              - Prefer values from the first/top header table, not from later sections.
+              - Allow minor OCR mistakes (e.g. O vs 0, I vs 1, missing colons or whitespace).
+              - Do NOT invent or guess numbers. If a value cannot be confidently extracted, return null.
+              - is_production_order can be true even when BOTH values are unreadable, as long
+                as the layout/structure/keywords clearly indicate a production order.
+              - is_production_order must be false if the document is something else (delivery
+                note, invoice, unrelated form).
+              - "missing_values" must list "auftragsnummer" and/or "produktion" only when
+                is_production_order is true AND that value could not be extracted. If
+                is_production_order is false, missing_values must be [].
+              - "confidence" is one of "high", "medium", "low". Use "low" when is_production_order
+                is false.
+
+            Return a single JSON object with EXACTLY these keys, no markdown, no extra prose:
+
+            {"is_production_order": true|false, "auftragsnummer": "..."|null, "produktion": "..."|null, "missing_values": [...], "confidence": "high"|"medium"|"low", "reason": "..."}
+
+            OCR text follows:
 
             {{ $ocrContent }}
         ';
@@ -142,46 +191,192 @@ class DeliveryNoteProcessorService
                 'ocr_result' => Str::limit($ocrContent, $this->getMaxOcrChatToSave(), ''),
             ]);
 
-            $message = $this->runAgent($this->getAgentPrompt(), $ocrContent);
-            $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
-
-            $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
-            $generatedFilename = FileRenamingService::generate($filenameData);
-            $isUnknown = FileRenamingService::isFallback($filenameData);
-
-            $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
-
-            try {
-
-                $saveToFolder = $isUnknown
-                    ? config('delivery_note_processor.unknown_folder')
-                    : config('delivery_note_processor.target_folder');
-
-                $this->disk->copy(
-                    $updatedProcess->source_file_path,
-                    $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename
+            $productionOrderResult = $this->extractProductionOrder($ocrContent);
+            if ($productionOrderResult !== null && ($productionOrderResult['content']->is_production_order ?? false) === true) {
+                return $this->handleProductionOrder(
+                    $process,
+                    $productionOrderResult['message'],
+                    $productionOrderResult['content']
                 );
-
-                $this->copyToFixedPath(
-                    $updatedProcess->source_file_path,
-                    $isUnknown ? self::FIXED_UNKNOWN_PATH : self::FIXED_DELIVERY_NOTES_PATH,
-                    $generatedFilename
-                );
-            } catch (Exception $e) {
-                $updatedProcess->update([
-                    'status' => 'failed',
-                    'failed_message' => $e->getMessage(),
-                    'failed_trace' => $e->getTraceAsString(),
-                ]);
-
-                Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
             }
 
-            return $updatedProcess;
+            return $this->handleDeliveryNote($process, $ocrContent);
         }
 
         return $process;
 
+    }
+
+    /**
+     * Delivery-note branch. Extracted unchanged from the previous inline
+     * code so the production-order branch can short-circuit before it.
+     */
+    private function handleDeliveryNote(Process $process, string $ocrContent): Process
+    {
+        $message = $this->runAgent($this->getAgentPrompt(), $ocrContent);
+        $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
+
+        $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
+        $generatedFilename = FileRenamingService::generate($filenameData);
+        $isUnknown = FileRenamingService::isFallback($filenameData);
+
+        $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
+
+        try {
+
+            $saveToFolder = $isUnknown
+                ? config('delivery_note_processor.unknown_folder')
+                : config('delivery_note_processor.target_folder');
+
+            $this->disk->copy(
+                $updatedProcess->source_file_path,
+                $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename
+            );
+
+            $this->copyToFixedPath(
+                $updatedProcess->source_file_path,
+                $isUnknown ? self::FIXED_UNKNOWN_PATH : self::FIXED_DELIVERY_NOTES_PATH,
+                $generatedFilename
+            );
+        } catch (Exception $e) {
+            $updatedProcess->update([
+                'status' => 'failed',
+                'failed_message' => $e->getMessage(),
+                'failed_trace' => $e->getTraceAsString(),
+            ]);
+
+            Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
+        }
+
+        return $updatedProcess;
+    }
+
+    /**
+     * Production-order branch. Runs only when the production-order agent
+     * confidently says the document IS a production order. Missing values
+     * do NOT divert the file to the unknown-review folder — they collapse
+     * to the literal `xxxxxx` placeholder via FilenameNormalizer (the same
+     * fallback logic already used for delivery notes).
+     */
+    private function handleProductionOrder(Process $process, Message $message, object $messageContent): Process
+    {
+        $filenameData = $this->buildProductionOrderFilenameData($process, $messageContent);
+        $generatedFilename = FileRenamingService::generateProductionOrder($filenameData);
+
+        $targetFolder = config('delivery_note_processor.production_order_folder');
+
+        $process->target_file_path = $targetFolder . DIRECTORY_SEPARATOR . $generatedFilename;
+        $process->status = 'finished';
+        $process->input_token = $message->getUsage()->inputTokens;
+        $process->output_token = $message->getUsage()->outputTokens;
+        $process->total_token = $message->getUsage()->getTotal();
+        $process->save();
+
+        try {
+            $this->disk->copy(
+                $process->source_file_path,
+                $targetFolder . DIRECTORY_SEPARATOR . $generatedFilename
+            );
+
+            $this->copyToFixedPath(
+                $process->source_file_path,
+                self::FIXED_PRODUCTION_ORDERS_PATH,
+                $generatedFilename
+            );
+        } catch (Exception $e) {
+            $process->update([
+                'status' => 'failed',
+                'failed_message' => $e->getMessage(),
+                'failed_trace' => $e->getTraceAsString(),
+            ]);
+
+            Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
+        }
+
+        return $process;
+    }
+
+    /**
+     * Run the production-order agent and return the message + parsed
+     * content, or null if the response is unusable. Defensive parsing:
+     * any exception from the agent or any structurally invalid JSON
+     * yields null so the caller falls through to the delivery-note flow.
+     *
+     * @return array{message: Message, content: object}|null
+     */
+    private function extractProductionOrder(string $ocrContent): ?array
+    {
+        try {
+            $message = $this->runAgent($this->getProductionOrderPrompt(), $ocrContent, ProductionOrderAgent::class);
+        } catch (Throwable $e) {
+            Log::warning('Production-order agent failed, falling back to delivery-note flow: ' . $e->getMessage());
+            return null;
+        }
+
+        $content = $this->normalizeProductionOrderContent(json_decode($message->getContent()));
+        if ($content === null) {
+            return null;
+        }
+
+        return ['message' => $message, 'content' => $content];
+    }
+
+    /**
+     * Validate the production-order JSON defensively. The agent's reply
+     * is not trusted: only a stdClass (or first stdClass of an array) with
+     * a real `is_production_order` boolean is accepted. Other fields are
+     * coerced to scalar/null so downstream code can rely on the shape.
+     */
+    public function normalizeProductionOrderContent(mixed $content): ?object
+    {
+        $object = $this->getObjectFromContent($content);
+        if ($object === null) {
+            return null;
+        }
+
+        if (!property_exists($object, 'is_production_order') || !is_bool($object->is_production_order)) {
+            return null;
+        }
+
+        $normalized = new stdClass();
+        $normalized->is_production_order = $object->is_production_order;
+        $normalized->auftragsnummer = $this->coerceNullableString($object->auftragsnummer ?? null);
+        $normalized->produktion = $this->coerceNullableString($object->produktion ?? null);
+        $normalized->confidence = $this->coerceNullableString($object->confidence ?? null);
+        $normalized->reason = $this->coerceNullableString($object->reason ?? null);
+
+        return $normalized;
+    }
+
+    private function coerceNullableString(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (is_string($value)) {
+            $trimmed = trim($value);
+            return $trimmed === '' ? null : $trimmed;
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string)$value;
+        }
+        return null;
+    }
+
+    /**
+     * Build the input array for FileRenamingService::generateProductionOrder().
+     * Each value is passed through unchanged; the sanitizer collapses
+     * unusable input (null, whitespace, symbols-only) to the empty string,
+     * which the renamer then renders as the literal `xxxxxx` placeholder.
+     */
+    private function buildProductionOrderFilenameData(Process $process, object $messageContent): array
+    {
+        return [
+            'auftragsnummer' => $messageContent->auftragsnummer ?? null,
+            'produktion' => $messageContent->produktion ?? null,
+            'extension' => Str::afterLast($process->source_file_path, '.'),
+            'timestamp' => Carbon::now()->format('YmdHis'),
+        ];
     }
 
     /**
@@ -298,6 +493,24 @@ class DeliveryNoteProcessorService
     public function setAgentPrompt(string $agentPrompt): self
     {
         $this->agentPrompt = $agentPrompt;
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    public function getProductionOrderPrompt(): string
+    {
+        return $this->productionOrderPrompt;
+    }
+
+    /**
+     * @param string $productionOrderPrompt
+     * @return $this
+     */
+    public function setProductionOrderPrompt(string $productionOrderPrompt): self
+    {
+        $this->productionOrderPrompt = $productionOrderPrompt;
         return $this;
     }
 
@@ -462,13 +675,14 @@ class DeliveryNoteProcessorService
     /**
      * @param string $prompt
      * @param string $ocrContent
+     * @param class-string<Agent> $agentClass
      * @return Message
      * @throws Throwable
      */
-    private function runAgent(string $prompt, string $ocrContent): Message
+    private function runAgent(string $prompt, string $ocrContent, string $agentClass = DeliveryNoteAgent::class): Message
     {
         $prompt = str_replace('{{ $ocrContent }}', $ocrContent, $prompt);
-        return DeliveryNoteAgent::make()->chat(new UserMessage($prompt));
+        return $agentClass::make()->chat(new UserMessage($prompt));
     }
 
     /**
