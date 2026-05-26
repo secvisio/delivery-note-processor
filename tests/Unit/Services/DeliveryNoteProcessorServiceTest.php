@@ -93,3 +93,68 @@ it('falls back to ls_xxxxxx_xxxxxx_{timestamp} when company is below threshold a
 
     Carbon::setTestNow();
 });
+
+it('normalizes a well-formed production-order JSON payload', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $payload = (object)[
+        'is_production_order' => true,
+        'auftragsnummer' => '123456',
+        'produktion' => '98765',
+        'missing_values' => [],
+        'confidence' => 'high',
+        'reason' => 'Both Auftrag and Produktion were found in the top header table.',
+    ];
+
+    $normalized = $service->normalizeProductionOrderContent($payload);
+
+    expect($normalized)->not->toBeNull()
+        ->and($normalized->is_production_order)->toBeTrue()
+        ->and($normalized->auftragsnummer)->toBe('123456')
+        ->and($normalized->produktion)->toBe('98765')
+        ->and($normalized->confidence)->toBe('high');
+});
+
+it('rejects production-order payloads without a boolean is_production_order', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $missing = (object)['auftragsnummer' => '1'];
+    $wrongType = (object)['is_production_order' => 'yes'];
+
+    expect($service->normalizeProductionOrderContent($missing))->toBeNull()
+        ->and($service->normalizeProductionOrderContent($wrongType))->toBeNull()
+        ->and($service->normalizeProductionOrderContent(null))->toBeNull()
+        ->and($service->normalizeProductionOrderContent('not-an-object'))->toBeNull();
+});
+
+it('coerces numeric production-order values into strings and treats blank strings as null', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $payload = (object)[
+        'is_production_order' => true,
+        'auftragsnummer' => 123456,
+        'produktion' => '   ',
+        'confidence' => 'medium',
+    ];
+
+    $normalized = $service->normalizeProductionOrderContent($payload);
+
+    expect($normalized)->not->toBeNull()
+        ->and($normalized->auftragsnummer)->toBe('123456')
+        ->and($normalized->produktion)->toBeNull();
+});
+
+it('accepts a production-order payload wrapped in a single-element array', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $payload = [(object)[
+        'is_production_order' => false,
+        'auftragsnummer' => null,
+        'produktion' => null,
+    ]];
+
+    $normalized = $service->normalizeProductionOrderContent($payload);
+
+    expect($normalized)->not->toBeNull()
+        ->and($normalized->is_production_order)->toBeFalse();
+});

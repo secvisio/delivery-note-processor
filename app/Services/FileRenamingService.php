@@ -34,6 +34,8 @@ final class FileRenamingService
 {
     public const PREFIX = 'ls';
 
+    public const PRODUCTION_ORDER_PREFIX = 'PA';
+
     public const FALLBACK = FilenameNormalizer::FALLBACK_TOKEN;
 
     /**
@@ -56,6 +58,45 @@ final class FileRenamingService
         $segments = [self::PREFIX, $idSegment, $companySegment];
 
         if ($id === '' || $company === '') {
+            $segments[] = self::resolveTimestamp($data['timestamp'] ?? null);
+        }
+
+        return implode('_', $segments) . '.' . $ext;
+    }
+
+    /**
+     * Build the canonical production-order filename:
+     *
+     *   PA_{auftrag|xxxxxx}_{produktion|xxxxxx}[_{YmdHis}].{ext}
+     *
+     * The timestamp suffix is appended ONLY when BOTH values are missing.
+     * If a single value is present it acts as a unique identifier on its
+     * own — matching the spec example `PA_xxxxxx_98765.pdf`.
+     *
+     * Reuses the same FilenameNormalizer rules used for delivery notes:
+     * identifiers are lowercased and stripped of non-alphanumerics; the
+     * extension is whitelist-restricted; the `PA_` prefix is concatenated
+     * last so no sanitization pass can swallow it.
+     *
+     * @param array{
+     *   auftragsnummer?: ?string,
+     *   produktion?:     ?string,
+     *   extension?:      ?string,
+     *   timestamp?:      ?string,
+     * } $data
+     */
+    public static function generateProductionOrder(array $data): string
+    {
+        $auftrag = FilenameNormalizer::sanitizeIdentifier($data['auftragsnummer'] ?? null);
+        $produktion = FilenameNormalizer::sanitizeIdentifier($data['produktion'] ?? null);
+        $ext = FilenameNormalizer::sanitizeExtension($data['extension'] ?? null);
+
+        $auftragSegment = $auftrag !== '' ? $auftrag : self::FALLBACK;
+        $produktionSegment = $produktion !== '' ? $produktion : self::FALLBACK;
+
+        $segments = [self::PRODUCTION_ORDER_PREFIX, $auftragSegment, $produktionSegment];
+
+        if ($auftrag === '' && $produktion === '') {
             $segments[] = self::resolveTimestamp($data['timestamp'] ?? null);
         }
 
