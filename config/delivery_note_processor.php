@@ -3,14 +3,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Where to save original scanned files
+    | Technical source-of-truth folder for incoming files
     |--------------------------------------------------------------------------
     |
-    | The source folder within a disk
+    | Both the scanner and web-frontend uploads drop files into this folder on
+    | the delivery_notes disk, and the inotify watcher / processor read from it.
+    | It is the fixed technical input folder and must NOT be confused with the
+    | human-visible archive (DELIVERY_NOTES_SOURCE_FOLDER / ScannerOriginale),
+    | which is only a copy location handled inside the processor. Keep it 'source'.
     |
     */
 
-    'source_folder' => env('DELIVERY_NOTES_SOURCE_FOLDER', 'source'),
+    'source_folder' => 'source',
 
     /*
     |--------------------------------------------------------------------------
