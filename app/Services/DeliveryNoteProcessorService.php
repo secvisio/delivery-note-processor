@@ -440,8 +440,31 @@ class DeliveryNoteProcessorService
      */
     public function fileArrived(string $sourcePath, string $hash, int $filesize): void
     {
+        // Primary idempotency guard: a single source file must never be turned
+        // into two Process rows / two jobs. close_write (and other writers) can
+        // fire repeatedly for the same file, so we refuse to create a duplicate
+        // when an active or already-completed process exists for this exact
+        // source path. A previously `failed` process is intentionally NOT a
+        // blocker, so a fixed file can still be re-processed.
+        if ($this->hasActiveProcessFor($sourcePath)) {
+            Log::info('skipping duplicate process for file ' . $sourcePath);
+            return;
+        }
+
         $process = $this->createProcess($sourcePath, $hash, $filesize);
         ProcessDeliveryNoteJob::dispatch($process->id)->onQueue('default');
+    }
+
+    /**
+     * Whether a non-failed Process already exists for the given source path.
+     * Uses the actual `source_file_path` column stored on the processes table.
+     */
+    private function hasActiveProcessFor(string $sourcePath): bool
+    {
+        return Process::query()
+            ->where('source_file_path', $sourcePath)
+            ->whereIn('status', ['pending', 'running'])
+            ->exists();
     }
 
     /**
