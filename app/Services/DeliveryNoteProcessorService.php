@@ -171,7 +171,7 @@ class DeliveryNoteProcessorService
             } catch (Exception $e) {
                 $process->update([
                     'status' => 'failed',
-                    'failed_message' => $e->getMessage(),
+                    'failed_message' => Str::limit($e->getMessage(), 1000),
                     'failed_trace' => $e->getTraceAsString(),
                 ]);
 
@@ -241,7 +241,7 @@ class DeliveryNoteProcessorService
         } catch (Exception $e) {
             $updatedProcess->update([
                 'status' => 'failed',
-                'failed_message' => $e->getMessage(),
+                'failed_message' => Str::limit($e->getMessage(), 1000),
                 'failed_trace' => $e->getTraceAsString(),
             ]);
 
@@ -286,7 +286,7 @@ class DeliveryNoteProcessorService
         } catch (Exception $e) {
             $process->update([
                 'status' => 'failed',
-                'failed_message' => $e->getMessage(),
+                'failed_message' => Str::limit($e->getMessage(), 1000),
                 'failed_trace' => $e->getTraceAsString(),
             ]);
 
@@ -623,12 +623,31 @@ class DeliveryNoteProcessorService
     }
 
     /**
+     * Resolve a disk-relative path to an absolute filesystem path exactly once.
+     *
+     * Internally every path is kept RELATIVE to the delivery_notes disk; the
+     * conversion to absolute happens only at the external boundary (tesseract,
+     * finfo, the PDF converter). This guard is idempotent: if an already
+     * absolute path slips through it is returned unchanged instead of being
+     * resolved a second time (which produced the duplicated
+     * "<root>/<root>/file" path that crashed tesseract).
+     */
+    private function absolutePath(string $path): string
+    {
+        if (str_starts_with($path, DIRECTORY_SEPARATOR)) {
+            return $path;
+        }
+
+        return $this->disk->path($path);
+    }
+
+    /**
      * @param $file
      * @return bool
      */
     private function isPdf($file): bool
     {
-        $file = $this->disk->path($file);
+        $file = $this->absolutePath($file);
         $extension = strtolower(pathinfo($file, PATHINFO_EXTENSION));
 
         $fileInfo = finfo_open(FILEINFO_MIME_TYPE);
@@ -650,7 +669,7 @@ class DeliveryNoteProcessorService
      */
     private function runOCR(string $imageFile): string
     {
-        $absolutePath = $this->disk->path($imageFile);
+        $absolutePath = $this->absolutePath($imageFile);
 
         $process = new SymfonyProcess(['tesseract', $absolutePath, '-']);
         $process->setTimeout(self::TESSERACT_TIMEOUT_SECONDS);
