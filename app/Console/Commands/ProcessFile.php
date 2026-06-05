@@ -34,6 +34,14 @@ class ProcessFile extends Command
 
         $sourcePath = config('delivery_note_processor.source_folder') . DIRECTORY_SEPARATOR . $filename;
 
+        // TEMP DIAGNOSTIC: prove what the watcher passed and where it resolves.
+        Log::info('Watcher file arrived', [
+            'raw_filename_arg' => $filename,
+            'stored_source_path' => $sourcePath,
+            'resolved_absolute' => Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->path($sourcePath),
+            'source_folder' => config('delivery_note_processor.source_folder'),
+        ]);
+
         if (!Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($sourcePath)) {
             $message = 'Watcher error: ' . $sourcePath . ' does not exists';
 

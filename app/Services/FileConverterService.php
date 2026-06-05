@@ -27,35 +27,29 @@ class FileConverterService
     {
         $disk = Storage::disk(config('delivery_note_processor.delivery_notes_disk'));
 
-        // Convert relative → absolute for the external library
+        // Convert relative → absolute for the external library.
         $absoluteSource = $disk->path($filePath);
-        $absoluteTargetDir = $disk->path(config('delivery_note_processor.target_folder'));
-
-        $convertedFile = null;
 
         switch ($convertFrom) {
             case 'pdf':
-                $pdf = new Pdf($absoluteSource);
+                // The converted image is the OCR INPUT, so it must live in the
+                // technical source folder next to the original — NOT in an
+                // output target folder (Lieferscheine/etc.). Same base name,
+                // new extension, kept relative to the disk.
+                $convertedFile = config('delivery_note_processor.source_folder')
+                    . DIRECTORY_SEPARATOR . $this->getFileName($filePath) . '.' . $convertTo;
 
-                $savedFile = $pdf->save(
-                    $absoluteTargetDir,
-                    $this->getFileName($filePath)
-                );
+                // The installed Spatie API treats save()'s first argument as the
+                // full image PATH (not a directory), so pass an absolute file
+                // path. Passing a directory previously produced a mangled name
+                // like "<name><targetFolder>.jpg".
+                (new Pdf($absoluteSource))->save($disk->path($convertedFile));
 
-                // Always hand back a clean RELATIVE path on the delivery_notes
-                // disk. Taking only basename() of whatever absolute path the
-                // library returns avoids fragile prefix matching (which could
-                // leak the absolute path) and guarantees the caller resolves it
-                // to absolute exactly once.
-                $convertedFile = config('delivery_note_processor.target_folder')
-                    . DIRECTORY_SEPARATOR . basename($savedFile[0]);
-                break;
+                return $convertedFile;
 
             default:
                 throw new Exception('No conversion source type given. e.g. "pdf"');
         }
-
-        return $convertedFile;
     }
 
     /**

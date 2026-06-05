@@ -166,7 +166,9 @@ class DeliveryNoteProcessorService
         if ($this->isPdf($process->source_file_path)) {
 
             try {
-                $fileConverter = new FileConverterService(config('delivery_note_processor.target_folder'));
+                // PDFs are rasterised into the SOURCE folder (the OCR input
+                // area), never into an output target folder.
+                $fileConverter = new FileConverterService(config('delivery_note_processor.source_folder'));
                 $fileToProcess = $fileConverter->run($process->source_file_path, 'pdf', 'jpg');
             } catch (Exception $e) {
                 $process->update([
@@ -670,6 +672,16 @@ class DeliveryNoteProcessorService
     private function runOCR(string $imageFile): string
     {
         $absolutePath = $this->absolutePath($imageFile);
+
+        // TEMP DIAGNOSTIC: prove exactly which file tesseract is about to read.
+        Log::info('OCR input resolved', [
+            'ocr_input_relative' => $imageFile,
+            'ocr_input_absolute' => $absolutePath,
+            'file_exists' => file_exists($absolutePath),
+            'disk_root' => $this->disk->path(''),
+            'source_folder' => config('delivery_note_processor.source_folder'),
+            'target_folder' => config('delivery_note_processor.target_folder'),
+        ]);
 
         $process = new SymfonyProcess(['tesseract', $absolutePath, '-']);
         $process->setTimeout(self::TESSERACT_TIMEOUT_SECONDS);
