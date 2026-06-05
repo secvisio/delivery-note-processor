@@ -163,13 +163,17 @@ class DeliveryNoteProcessorService
             basename($process->source_file_path)
         );
 
+        // Absolute path of a temporary converted image to clean up after OCR.
+        $convertedTempFile = null;
+
         if ($this->isPdf($process->source_file_path)) {
 
             try {
-                // PDFs are rasterised into the SOURCE folder (the OCR input
-                // area), never into an output target folder.
-                $fileConverter = new FileConverterService(config('delivery_note_processor.source_folder'));
+                // PDFs are rasterised into a NON-watched temp dir (not `source`,
+                // not an output target) and read from there for OCR only.
+                $fileConverter = new FileConverterService(FileConverterService::tempDir());
                 $fileToProcess = $fileConverter->run($process->source_file_path, 'pdf', 'jpg');
+                $convertedTempFile = $fileToProcess;
             } catch (Exception $e) {
                 $process->update([
                     'status' => 'failed',
@@ -186,7 +190,15 @@ class DeliveryNoteProcessorService
             $fileToProcess = $process->source_file_path;
         }
 
-        $ocrContent = $this->runOCR($fileToProcess);
+        try {
+            $ocrContent = $this->runOCR($fileToProcess);
+        } finally {
+            // The converted image is only needed for OCR; never leave it behind
+            // (and never inside a watched folder).
+            if ($convertedTempFile !== null && is_file($convertedTempFile)) {
+                @unlink($convertedTempFile);
+            }
+        }
         if (!empty($ocrContent)) {
 
             $process->update([

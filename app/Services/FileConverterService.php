@@ -32,24 +32,42 @@ class FileConverterService
 
         switch ($convertFrom) {
             case 'pdf':
-                // The converted image is the OCR INPUT, so it must live in the
-                // technical source folder next to the original — NOT in an
-                // output target folder (Lieferscheine/etc.). Same base name,
-                // new extension, kept relative to the disk.
-                $convertedFile = config('delivery_note_processor.source_folder')
-                    . DIRECTORY_SEPARATOR . $this->getFileName($filePath) . '.' . $convertTo;
+                // The converted image is a throwaway OCR INPUT. It must NOT be
+                // written into the watched `source` folder — doing so triggers a
+                // second inotify close_write event and a duplicate process — nor
+                // into an output target folder. Write it to a dedicated,
+                // NON-watched temp directory and return its ABSOLUTE path; the
+                // caller resolves/reads it once and deletes it after OCR.
+                $tmpDir = self::tempDir();
+
+                $convertedFile = $tmpDir . DIRECTORY_SEPARATOR
+                    . $this->getFileName($filePath) . '.' . $convertTo;
 
                 // The installed Spatie API treats save()'s first argument as the
-                // full image PATH (not a directory), so pass an absolute file
-                // path. Passing a directory previously produced a mangled name
-                // like "<name><targetFolder>.jpg".
-                (new Pdf($absoluteSource))->save($disk->path($convertedFile));
+                // full image PATH (not a directory).
+                (new Pdf($absoluteSource))->save($convertedFile);
 
                 return $convertedFile;
 
             default:
                 throw new Exception('No conversion source type given. e.g. "pdf"');
         }
+    }
+
+    /**
+     * Absolute path of the non-watched scratch directory for converted images.
+     * Created on demand. Kept outside storage/delivery-notes so inotify (which
+     * watches only .../delivery-notes/source) never sees these files.
+     */
+    public static function tempDir(): string
+    {
+        $dir = storage_path('app/tmp/delivery-note-processor');
+
+        if (!is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+
+        return $dir;
     }
 
     /**
