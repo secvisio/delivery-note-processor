@@ -3,7 +3,9 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use Exception;
 use Illuminate\Support\Facades\Storage;
+use Spatie\PdfToImage\Exceptions\PdfDoesNotExist;
 use Spatie\PdfToImage\Pdf;
 
 class FileConverterService
@@ -19,7 +21,7 @@ class FileConverterService
      * @param string $convertFrom
      * @param string $convertTo
      * @return string
-     * @throws \Spatie\PdfToImage\Exceptions\PdfDoesNotExist
+     * @throws PdfDoesNotExist
      */
     public function run(string $filePath, string $convertFrom, string $convertTo = 'jpg'): string
     {
@@ -40,18 +42,17 @@ class FileConverterService
                     $this->getFileName($filePath)
                 );
 
-                // If library returns absolute path, convert back to relative
-                $absoluteResult = $savedFile[0];
-
-                $convertedFile = str_replace(
-                    $absoluteTargetDir . DIRECTORY_SEPARATOR,
-                    config('delivery_note_processor.target_folder') . DIRECTORY_SEPARATOR,
-                    $absoluteResult
-                );
+                // Always hand back a clean RELATIVE path on the delivery_notes
+                // disk. Taking only basename() of whatever absolute path the
+                // library returns avoids fragile prefix matching (which could
+                // leak the absolute path) and guarantees the caller resolves it
+                // to absolute exactly once.
+                $convertedFile = config('delivery_note_processor.target_folder')
+                    . DIRECTORY_SEPARATOR . basename($savedFile[0]);
                 break;
 
             default:
-                throw new \Exception('No conversion source type given. e.g. "pdf"');
+                throw new Exception('No conversion source type given. e.g. "pdf"');
         }
 
         return $convertedFile;

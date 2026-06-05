@@ -11,6 +11,7 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 class ProcessDeliveryNoteJob implements ShouldQueue, ShouldBeUnique
@@ -63,7 +64,7 @@ class ProcessDeliveryNoteJob implements ShouldQueue, ShouldBeUnique
         } catch (Throwable $e) {
             $process->update([
                 'status' => 'failed',
-                'failed_message' => $e->getMessage(),
+                'failed_message' => Str::limit($e->getMessage(), 1000),
                 'failed_trace' => $e->getTraceAsString(),
             ]);
 
