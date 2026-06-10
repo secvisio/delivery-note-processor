@@ -104,8 +104,10 @@ final class FileRenamingService
     }
 
     /**
-     * True only when BOTH id and company are missing/unusable. Used by the
-     * processor service to route the file to the unknown-review folder.
+     * True when EITHER the id or the company is missing/unusable. Used by the
+     * processor service to route the file to the unknown-review folder: a file
+     * needs a human whenever at least one required value could not be
+     * determined, even if the other one was extracted successfully.
      * Computed from the same sanitized inputs as generate(), so the routing
      * decision and the rendered filename never disagree.
      */
@@ -114,7 +116,7 @@ final class FileRenamingService
         $id = FilenameNormalizer::sanitizeIdentifier($data['delivery_note_id'] ?? null);
         $company = FilenameNormalizer::sanitizeCompanyName($data['company_name'] ?? null);
 
-        return $id === '' && $company === '';
+        return $id === '' || $company === '';
     }
 
     private static function resolveTimestamp(?string $timestamp): string

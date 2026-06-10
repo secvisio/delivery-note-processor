@@ -28,7 +28,6 @@ use Throwable;
 
 class DeliveryNoteProcessorService
 {
-    private const FIXED_ORIGINALS_PATH = '/mnt/laufwerk/ScannerOriginale';
     private const FIXED_DELIVERY_NOTES_PATH = '/mnt/laufwerk/Lieferscheine';
     private const FIXED_UNKNOWN_PATH = '/mnt/laufwerk/Nicht zugeordnet';
     private const FIXED_PRODUCTION_ORDERS_PATH = '/mnt/laufwerk/Produktionsaufträge';
@@ -157,12 +156,6 @@ class DeliveryNoteProcessorService
             return $process;
         }
 
-        $this->copyToFixedPath(
-            $process->source_file_path,
-            self::FIXED_ORIGINALS_PATH,
-            basename($process->source_file_path)
-        );
-
         // Absolute path of a temporary converted image to clean up after OCR.
         $convertedTempFile = null;
 
@@ -234,13 +227,13 @@ class DeliveryNoteProcessorService
         $generatedFilename = FileRenamingService::generate($filenameData);
         $isUnknown = FileRenamingService::isFallback($filenameData);
 
-        $updatedProcess = $this->updateProcess($process, $message, $messageContent, $generatedFilename);
+        $saveToFolder = $isUnknown
+            ? config('delivery_note_processor.unknown_folder')
+            : config('delivery_note_processor.target_folder');
+
+        $updatedProcess = $this->updateProcess($process, $message, $messageContent, $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename);
 
         try {
-
-            $saveToFolder = $isUnknown
-                ? config('delivery_note_processor.unknown_folder')
-                : config('delivery_note_processor.target_folder');
 
             $this->disk->copy(
                 $updatedProcess->source_file_path,
@@ -610,12 +603,12 @@ class DeliveryNoteProcessorService
      * @param Process $process
      * @param Message $message
      * @param object $messageContent
-     * @param string $generatedFilename
+     * @param string $targetFilePath relative destination path (folder + filename) where the file is actually saved
      * @return Process
      */
-    private function updateProcess(Process $process, Message $message, object $messageContent, string $generatedFilename): Process
+    private function updateProcess(Process $process, Message $message, object $messageContent, string $targetFilePath): Process
     {
-        $process->target_file_path = config('delivery_note_processor.target_folder') . DIRECTORY_SEPARATOR . $generatedFilename;
+        $process->target_file_path = $targetFilePath;
         $process->status = 'finished';
         $process->company_name = $messageContent->company?->name;
         $process->company_name_certainty = $messageContent->company?->percent;
