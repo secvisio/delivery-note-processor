@@ -144,17 +144,25 @@ it('is byte-for-byte idempotent across repeated calls', function () {
     }
 });
 
-it('reports isFallback true only when both id and company are unusable', function () {
+it('reports isFallback true when either id or company is unusable', function () {
+    // Both missing -> review
     expect(FileRenamingService::isFallback([
         'delivery_note_id' => null,
         'company_name' => '',
     ]))->toBeTrue()
+        // Company missing (id found) -> review
         ->and(FileRenamingService::isFallback([
             'delivery_note_id' => '8532',
             'company_name' => null,
-        ]))->toBeFalse()
+        ]))->toBeTrue()
+        // Id missing (company found) -> review
         ->and(FileRenamingService::isFallback([
             'delivery_note_id' => null,
+            'company_name' => 'Acme',
+        ]))->toBeTrue()
+        // Both present -> normal processing folder
+        ->and(FileRenamingService::isFallback([
+            'delivery_note_id' => '8532',
             'company_name' => 'Acme',
         ]))->toBeFalse();
 });
