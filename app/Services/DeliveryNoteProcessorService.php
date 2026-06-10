@@ -28,7 +28,6 @@ use Throwable;
 
 class DeliveryNoteProcessorService
 {
-    private const FIXED_ORIGINALS_PATH = '/mnt/laufwerk/ScannerOriginale';
     private const FIXED_DELIVERY_NOTES_PATH = '/mnt/laufwerk/Lieferscheine';
     private const FIXED_UNKNOWN_PATH = '/mnt/laufwerk/Nicht zugeordnet';
     private const FIXED_PRODUCTION_ORDERS_PATH = '/mnt/laufwerk/Produktionsaufträge';
@@ -156,12 +155,6 @@ class DeliveryNoteProcessorService
 
             return $process;
         }
-
-        $this->copyToFixedPath(
-            $process->source_file_path,
-            self::FIXED_ORIGINALS_PATH,
-            basename($process->source_file_path)
-        );
 
         // Absolute path of a temporary converted image to clean up after OCR.
         $convertedTempFile = null;

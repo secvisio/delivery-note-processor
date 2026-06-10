@@ -4,9 +4,7 @@ set -e
 
 # Technical source-of-truth folder: the scanner AND web-frontend uploads both
 # write here, and this is the only folder the processor reads from. It is the
-# 'source' subfolder of the delivery_notes disk (storage/delivery-notes). The
-# human-visible archive (/mnt/laufwerk/ScannerOriginale) is written separately
-# by the processor and must NOT be watched here.
+# 'source' subfolder of the delivery_notes disk (storage/delivery-notes).
 WATCH_DIR=/var/www/delivery-note-processor/storage/delivery-notes/source
 
 # Per-filename locks debounce duplicate close_write events for the same file.

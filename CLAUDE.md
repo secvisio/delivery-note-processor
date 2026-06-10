@@ -50,7 +50,7 @@ The job calls `DeliveryNoteProcessorService::run($process)`, which:
 
 All file IO goes through the `delivery_notes` Laravel disk (configured in `config/filesystems.php`). The disk root in
 production is **outside** `storage/` — `.env.production` points it at `/mnt/laufwerk` with German folder names (
-`ScannerOriginale`, `Lieferscheine`, `Nicht zugeordnet`). In dev the disk root is `storage_path('delivery-notes')`. *
+`Lieferscheine`, `Nicht zugeordnet`, `Produktionsaufträge`). In dev the disk root is `storage_path('delivery-notes')`. *
 *Always use `Storage::disk(config('delivery_note_processor.delivery_notes_disk'))` and pass relative paths**, not
 absolute ones — `FileConverterService` shows the convert-to-absolute-then-back-to-relative dance required for libraries
 that need real filesystem paths (Spatie PDF, Tesseract).

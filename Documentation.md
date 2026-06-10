@@ -34,15 +34,11 @@ so finding a delivery note later is just a matter of typing the number into a se
 
 You only ever do **one thing**: scan the delivery note on the office scanner.
 
-The office scanner is already configured to deliver every scan straight to the network drive. Once the scanner has
-finished, the new file shows up in the folder:
-
-```
-ScannerOriginale
-```
+The office scanner is already configured to deliver every scan straight to the network drive into the system's incoming
+folder. Once the scanner has finished, the system picks the new file up automatically.
 
 That is all the action required from you. You do not drag, drop, copy, upload, or rename anything. From the moment the
-file appears in `ScannerOriginale`, the system takes over.
+scan arrives, the system takes over.
 
 ### What happens after that — automatic
 
@@ -112,14 +108,8 @@ human to look at it.
 
 ## 4. Folder structure explained
 
-There are three folders the system uses. They are all under the shared network drive.
-
-### `ScannerOriginale` — Original scans
-
-- This is where every new scan **arrives** from the office scanner. It is the only folder you see scans appear in
-  directly.
-- The original file is **also kept here permanently**, untouched, with its original name.
-- Treat this folder as your **archive of raw scans**. Do not edit or delete files here unless you are sure.
+There are two result folders the system uses. They are both under the shared network drive. (Scans first arrive in an
+internal incoming folder that the system watches; you do not need to work in it directly — use the Process Log instead.)
 
 ### `Lieferscheine` — Successfully recognized delivery notes
 
@@ -146,7 +136,7 @@ the system treats it as "not recognized" and moves the file to `Nicht zugeordnet
 
 - The file is saved as `ls_xxxxxx_<company>_<timestamp>.pdf`.
 - It lands in `Nicht zugeordnet`.
-- A copy of the original scan is still in `ScannerOriginale`.
+- The original scan can be viewed from the Process Log.
 - **What to do**: open the original, find the number on the page, rename the file by hand, and move it to
   `Lieferscheine`.
 
@@ -161,7 +151,6 @@ the system treats it as "not recognized" and moves the file to `Nicht zugeordnet
 - If the page cannot be read at all (blank, very blurry, all text rotated upside down, etc.), no number and no company
   can be extracted.
 - The file gets a placeholder name and is filed in `Nicht zugeordnet`.
-- The original is preserved in `ScannerOriginale`.
 - The Process Log will show the document with status **failed** or with an empty OCR result, so you can see at a glance
   which scans need attention.
 
@@ -169,9 +158,8 @@ the system treats it as "not recognized" and moves the file to `Nicht zugeordnet
 
 Even when recognition fails:
 
-- the **original scan is always kept** in `ScannerOriginale`,
 - the renamed copy (with placeholders) is filed in `Nicht zugeordnet`,
-- the Process Log keeps a record with the time, the read text, and any error message.
+- the Process Log keeps a record with the time, the read text, the original scan, and any error message.
 
 ---
 
@@ -187,7 +175,7 @@ Even when recognition fails:
 ### "The delivery-note number is wrong"
 
 - The OCR may have read a similar-looking character (for example `O` instead of `0`, or `I` instead of `1`).
-- Open the original from `ScannerOriginale`, confirm the correct number, and rename the file by hand.
+- Open the original from the Process Log, confirm the correct number, and rename the file by hand.
 - If this happens often with the same supplier, see the tips in section 7.
 
 ### "The company name is recognized but with strange splits"
@@ -240,8 +228,6 @@ The system is only as good as the scan it gets. A few simple habits make a big d
 
 - **Do not edit** files inside `Lieferscheine` or `Nicht zugeordnet` while the system is processing them. Wait until the
   Process Log shows them as *finished*.
-- **Do not delete** files from `ScannerOriginale` to "clean up". This is your safety archive — if you ever need to redo
-  a recognition, the original needs to still be there.
 - If you need to **redo** a document (for example because the recognition was wrong), simply scan it again on the office
   scanner. The system will create a new entry; the old one stays in the Process Log for reference.
 
@@ -262,5 +248,5 @@ The system is only as good as the scan it gets. A few simple habits make a big d
 | `ls_xxxxxx_<company>_<timestamp>.pdf` in `Nicht zugeordnet` | Number not read                                        | Look up the number, rename, move to `Lieferscheine`  |
 | `ls_<id>_xxxxxx.pdf` in `Nicht zugeordnet`                  | Company not read                                       | Look up the company, rename, move to `Lieferscheine` |
 | `ls_xxxxxx_xxxxxx_<timestamp>.pdf` in `Nicht zugeordnet`    | Nothing recognized                                     | Check scan quality; rescan if needed                 |
-| File visible in `ScannerOriginale` only                     | Just arrived from the scanner; processing in progress  | Wait, then check Process Log                         |
+| Document in Process Log as *running*                        | Just arrived from the scanner; processing in progress  | Wait, then check Process Log                         |
 | Process Log shows *failed*                                  | Something went wrong (often: blank page or scan error) | Open the original, rescan if needed                  |
