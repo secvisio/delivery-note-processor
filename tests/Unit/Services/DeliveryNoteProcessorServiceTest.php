@@ -158,3 +158,102 @@ it('accepts a production-order payload wrapped in a single-element array', funct
     expect($normalized)->not->toBeNull()
         ->and($normalized->is_production_order)->toBeFalse();
 });
+
+/*
+|--------------------------------------------------------------------------
+| Destination routing (folder + filename) for delivery notes
+|--------------------------------------------------------------------------
+|
+| resolveDeliveryDestination() is the pure routing decision extracted from
+| handleDeliveryNote(): given the LLM payload and the already-resolved
+| canonical company name, it returns the destination folder, the filename,
+| and the unknown flag — without touching OCR, the agent, or the disk. The
+| canonical company name is passed in directly here so routing is tested in
+| isolation from CompanyResolverService (which has its own test).
+*/
+
+it('routes to the target folder and uses the canonical slug when id and company are both resolved', function () {
+    $service = new DeliveryNoteProcessorService();
+    $process = makeProcess();
+
+    $messageContent = (object)[
+        'deliveryNote' => (object)['id' => 'DN-99', 'percent' => 0.95],
+    ];
+
+    $destination = $service->resolveDeliveryDestination($process, $messageContent, 'company-ux-123');
+
+    expect($destination['is_unknown'])->toBeFalse()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.target_folder'))
+        ->and($destination['filename'])->toBe('ls_dn99_company-ux-123.pdf');
+});
+
+it('routes to the unknown folder with xxxxxx company when company is unresolved', function () {
+    Carbon::setTestNow(Carbon::create(2026, 5, 5, 12, 40, 55));
+
+    $service = new DeliveryNoteProcessorService();
+    $process = makeProcess();
+
+    $messageContent = (object)[
+        'deliveryNote' => (object)['id' => 'DN-99', 'percent' => 0.95],
+    ];
+
+    $destination = $service->resolveDeliveryDestination($process, $messageContent, null);
+
+    expect($destination['is_unknown'])->toBeTrue()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.unknown_folder'))
+        ->and($destination['filename'])->toBe('ls_dn99_xxxxxx_20260505124055.pdf');
+
+    Carbon::setTestNow();
+});
+
+it('routes to the unknown folder when the delivery-note id is below threshold but company resolved', function () {
+    Carbon::setTestNow(Carbon::create(2026, 5, 5, 12, 40, 55));
+
+    $service = new DeliveryNoteProcessorService();
+    $process = makeProcess();
+
+    $messageContent = (object)[
+        'deliveryNote' => (object)['id' => 'DN-99', 'percent' => 0.10],
+    ];
+
+    $destination = $service->resolveDeliveryDestination($process, $messageContent, 'company-ux-123');
+
+    expect($destination['is_unknown'])->toBeTrue()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.unknown_folder'))
+        ->and($destination['filename'])->toBe('ls_xxxxxx_company-ux-123_20260505124055.pdf');
+
+    Carbon::setTestNow();
+});
+
+it('routes to the unknown folder when both the id and the company are missing', function () {
+    Carbon::setTestNow(Carbon::create(2026, 5, 5, 12, 40, 55));
+
+    $service = new DeliveryNoteProcessorService();
+    $process = makeProcess();
+
+    $messageContent = (object)[
+        'deliveryNote' => (object)['id' => null, 'percent' => 0.0],
+    ];
+
+    $destination = $service->resolveDeliveryDestination($process, $messageContent, null);
+
+    expect($destination['is_unknown'])->toBeTrue()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.unknown_folder'))
+        ->and($destination['filename'])->toBe('ls_xxxxxx_xxxxxx_20260505124055.pdf');
+
+    Carbon::setTestNow();
+});
+
+it('does not append a timestamp when both id and company are confidently resolved (regression)', function () {
+    $service = new DeliveryNoteProcessorService();
+    $process = makeProcess();
+
+    $messageContent = (object)[
+        'deliveryNote' => (object)['id' => '8532', 'percent' => 0.99],
+    ];
+
+    $destination = $service->resolveDeliveryDestination($process, $messageContent, 'siegwerk-backnang-gmbh');
+
+    expect($destination['filename'])->toBe('ls_8532_siegwerk-backnang-gmbh.pdf')
+        ->and($destination['is_unknown'])->toBeFalse();
+});

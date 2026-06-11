@@ -132,8 +132,17 @@ class DeliveryNoteProcessorService
      */
     protected Filesystem $disk;
 
-    public function __construct() {
+    /**
+     * Resolves raw LLM company names to a stable canonical filename slug.
+     *
+     * @var CompanyResolverService
+     */
+    protected CompanyResolverService $companyResolver;
+
+    public function __construct(?CompanyResolverService $companyResolver = null)
+    {
         $this->disk = Storage::disk(config('delivery_note_processor.delivery_notes_disk'));
+        $this->companyResolver = $companyResolver ?? new CompanyResolverService();
     }
 
     /**
@@ -221,15 +230,22 @@ class DeliveryNoteProcessorService
     private function handleDeliveryNote(Process $process, string $ocrContent): Process
     {
         $message = $this->runAgent($this->getAgentPrompt(), $ocrContent);
-        $messageContent = $this->getObjectFromContent(json_decode($message->getContent()));
+        $messageContent = $this->getObjectFromContent(json_decode($message->getContent())) ?? new stdClass();
 
-        $filenameData = $this->buildFilenameData($process, $messageContent, $this->getThreshold());
-        $generatedFilename = FileRenamingService::generate($filenameData);
-        $isUnknown = FileRenamingService::isFallback($filenameData);
+        // Resolve the raw LLM company name to a STABLE canonical slug so the
+        // same real company always renders identically across scans. A null
+        // result means "could not be trusted/matched" and collapses to the
+        // xxxxxx placeholder (→ unknown folder) via the same logic as before.
+        $resolvedCompanyName = $this->companyResolver->resolve(
+            $messageContent->company->name ?? null,
+            $this->extractCertainty($messageContent->company ?? null),
+            $ocrContent
+        );
 
-        $saveToFolder = $isUnknown
-            ? config('delivery_note_processor.unknown_folder')
-            : config('delivery_note_processor.target_folder');
+        $destination = $this->resolveDeliveryDestination($process, $messageContent, $resolvedCompanyName);
+        $generatedFilename = $destination['filename'];
+        $isUnknown = $destination['is_unknown'];
+        $saveToFolder = $destination['folder'];
 
         $updatedProcess = $this->updateProcess($process, $message, $messageContent, $saveToFolder . DIRECTORY_SEPARATOR . $generatedFilename);
 
@@ -435,6 +451,70 @@ class DeliveryNoteProcessorService
             'extension' => Str::afterLast($process->source_file_path, '.'),
             'timestamp' => Carbon::now()->format('YmdHis'),
         ];
+    }
+
+    /**
+     * Like buildFilenameData(), but the company segment is the already-resolved
+     * canonical slug from CompanyResolverService rather than the threshold-gated
+     * raw LLM name. The delivery-note id is still threshold-gated exactly as
+     * before. A null $resolvedCompanyName collapses to the xxxxxx placeholder,
+     * which (via FileRenamingService::isFallback) routes the file to the
+     * unknown folder — the existing rule that company OR id missing → unknown.
+     */
+    private function buildResolvedFilenameData(Process $process, object $messageContent, float $threshold, ?string $resolvedCompanyName): array
+    {
+        $deliveryNote = $messageContent->deliveryNote ?? null;
+        $deliveryNoteId = ($deliveryNote?->percent >= $threshold) ? ($deliveryNote->id ?? null) : null;
+
+        return [
+            'delivery_note_id' => $deliveryNoteId,
+            'company_name' => $resolvedCompanyName,
+            'extension' => Str::afterLast($process->source_file_path, '.'),
+            'timestamp' => Carbon::now()->format('YmdHis'),
+        ];
+    }
+
+    /**
+     * Pure routing decision for a delivery-note extraction: given the LLM
+     * payload and the already-resolved canonical company name, compute the
+     * destination folder, the final filename, and whether the file is
+     * "unknown" (needs human review). Extracted from handleDeliveryNote() so
+     * the routing can be tested without running OCR or the LLM agent.
+     *
+     * Folder rule (unchanged): the file goes to unknown_folder whenever the
+     * delivery-note id OR the company could not be confidently determined;
+     * otherwise it goes to target_folder.
+     *
+     * @return array{folder: string, filename: string, is_unknown: bool}
+     */
+    public function resolveDeliveryDestination(Process $process, object $messageContent, ?string $resolvedCompanyName): array
+    {
+        $filenameData = $this->buildResolvedFilenameData($process, $messageContent, $this->getThreshold(), $resolvedCompanyName);
+
+        $isUnknown = FileRenamingService::isFallback($filenameData);
+
+        return [
+            'folder' => $isUnknown
+                ? config('delivery_note_processor.unknown_folder')
+                : config('delivery_note_processor.target_folder'),
+            'filename' => FileRenamingService::generate($filenameData),
+            'is_unknown' => $isUnknown,
+        ];
+    }
+
+    /**
+     * Coerce the LLM's `percent` certainty (delivered as a string such as
+     * "0.9") into a float, or null when it is absent/unparseable.
+     */
+    private function extractCertainty(?object $node): ?float
+    {
+        $percent = $node->percent ?? null;
+
+        if ($percent === null || $percent === '' || !is_numeric($percent)) {
+            return null;
+        }
+
+        return (float)$percent;
     }
 
     /**
