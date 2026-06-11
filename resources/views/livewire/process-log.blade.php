@@ -36,6 +36,8 @@
 
                     </div>
                 </div>
+
+                @include('partials.company-nav', ['active' => 'dashboard'])
             </div>
 
         </div>
