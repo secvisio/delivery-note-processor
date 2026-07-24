@@ -53,6 +53,115 @@ final class FilenameNormalizer
     }
 
     /**
+     * Normalize a Frachtbrief "Order Nummer" (expected shape `YYMMDD-NN`).
+     *
+     * Deliberately NOT routed through sanitizeIdentifier(): that method strips
+     * every non-alphanumeric character, which would destroy the structural
+     * hyphen that makes the value recognizable (`260630-01` → `26063001`).
+     *
+     * Tolerated OCR noise:
+     *  - surrounding/inner whitespace ("260630 - 01", "260630- 01", "260630 -01")
+     *  - unicode dashes (en/em dash, minus sign) in place of the ASCII hyphen
+     *  - a completely dropped hyphen ("26063001"), which is re-inserted
+     *
+     * Anything that does not end up matching `\d{6}-\d{2}` exactly returns the
+     * empty string, which the caller renders as the `xxxxxx` placeholder. The
+     * six leading digits are NOT date-validated here — that is the separate
+     * concern of pickupDateFromOrderNumber().
+     */
+    public static function sanitizeOrderNumber(?string $orderNumber): string
+    {
+        $value = (string)$orderNumber;
+
+        // Unify the various dash characters OCR/LLM output onto ASCII '-'.
+        $value = str_replace(["\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", "\u{2014}", "\u{2212}"], '-', $value);
+
+        // Drop ALL whitespace, so spacing variants collapse onto one form.
+        $value = (string)preg_replace('/\s+/u', '', $value);
+
+        if (preg_match('/^(\d{6})-(\d{2})$/', $value, $matches) === 1) {
+            return $matches[1] . '-' . $matches[2];
+        }
+
+        // Hyphen lost during OCR: 8 straight digits still carry the structure.
+        if (preg_match('/^(\d{6})(\d{2})$/', $value, $matches) === 1) {
+            return $matches[1] . '-' . $matches[2];
+        }
+
+        return '';
+    }
+
+    /**
+     * Normalize an Abholdatum into the canonical `YYYY-MM-DD` filename segment.
+     *
+     * Accepted inputs (the formats seen on these documents plus the ISO form
+     * the agent is asked to emit):
+     *   2026-06-30 / 2026.06.30 / 2026/06/30   (Y-m-d)
+     *   30.06.2026 / 30/06/2026 / 30-06-2026   (d.m.Y)
+     *
+     * The day/month/year triple is validated with checkdate(), so impossible
+     * dates such as `31.02.2026` are rejected rather than silently rolled over
+     * (which is what a naive strtotime() would do). Returns '' when no real
+     * date can be determined.
+     */
+    public static function sanitizePickupDate(?string $date): string
+    {
+        $value = trim((string)$date);
+        if ($value === '') {
+            return '';
+        }
+
+        // Year-first: 2026-06-30, 2026.06.30, 2026/06/30
+        if (preg_match('#^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$#', $value, $m) === 1) {
+            return self::buildDate((int)$m[1], (int)$m[2], (int)$m[3]);
+        }
+
+        // Day-first: 30.06.2026, 30/06/2026, 30-06-2026
+        if (preg_match('#^(\d{1,2})[-./](\d{1,2})[-./](\d{4})$#', $value, $m) === 1) {
+            return self::buildDate((int)$m[3], (int)$m[2], (int)$m[1]);
+        }
+
+        return '';
+    }
+
+    /**
+     * Derive the Abholdatum from the `YYMMDD` prefix of a normalized order
+     * number (`260630-01` → `2026-06-30`).
+     *
+     * The two-digit year is expanded into the 2000s: these are freight papers
+     * for the current decade, and there is no in-band signal to distinguish a
+     * century. The resulting triple is checkdate()-validated, so an order
+     * number whose prefix is not a real date (e.g. `269930-01`) yields '' and
+     * the caller falls back to the `xxxxxx` placeholder.
+     *
+     * Expects an ALREADY normalized order number; pass the output of
+     * sanitizeOrderNumber() so the parsing rules live in exactly one place.
+     */
+    public static function pickupDateFromOrderNumber(?string $normalizedOrderNumber): string
+    {
+        $value = (string)$normalizedOrderNumber;
+
+        if (preg_match('/^(\d{2})(\d{2})(\d{2})-\d{2}$/', $value, $m) !== 1) {
+            return '';
+        }
+
+        return self::buildDate(2000 + (int)$m[1], (int)$m[2], (int)$m[3]);
+    }
+
+    /**
+     * Render a validated Y-m-d string, or '' when the triple is not a real
+     * calendar date.
+     */
+    private static function buildDate(int $year, int $month, int $day): string
+    {
+        if (!checkdate($month, $day, $year)) {
+            return '';
+        }
+
+        return sprintf('%04d-%02d-%02d', $year, $month, $day);
+    }
+
+    /**
      * Restrict the extension to a known whitelist. Anything unrecognized
      * (empty, mixed-case, '.php', '..', etc.) collapses to 'pdf' — the
      * dominant format in this pipeline — so a hostile or malformed source

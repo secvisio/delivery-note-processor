@@ -50,6 +50,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Where to save renamed Frachtbrief files
+    |--------------------------------------------------------------------------
+    |
+    | Files identified as freight waybills ("Frachtbriefe") are routed here
+    | instead of the delivery-note target folder. A confirmed Frachtbrief whose
+    | order number could NOT be extracted goes to `unknown_folder` instead —
+    | the order number is the document's primary identifier.
+    |
+    */
+
+    'frachtbrief_folder' => env('FRACHTBRIEFE_TARGET_FOLDER', 'Frachtbriefe'),
+
+    /*
+    |--------------------------------------------------------------------------
     | The disk name of saved files
     |--------------------------------------------------------------------------
     |

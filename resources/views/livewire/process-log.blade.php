@@ -213,6 +213,69 @@
                                                     <td class="w-25">{{ __('default.Job Status') }}:</td>
                                                     <td>{{ ucfirst($process->status) }}</td>
                                                 </tr>
+                                                {{--
+                                                    Frachtbrief rows are an ADDITIONAL branch: legacy rows
+                                                    (document_type === null), delivery notes and production
+                                                    orders all fall into the @else below and render exactly
+                                                    as before this feature existed.
+                                                --}}
+                                                @if($process->document_type === 'frachtbrief')
+
+                                                    @php
+                                                        // Null confidence renders no badge at all, rather
+                                                        // than a misleading "0%".
+                                                        $frachtbriefBadge = static function ($percent): ?array {
+                                                            if (null === $percent) {
+                                                                return null;
+                                                            }
+
+                                                            $value = (float) $percent;
+
+                                                            return [
+                                                                'class' => match (true) {
+                                                                    $value >= 0.7 => 'success',
+                                                                    $value > 0.3 => 'warning',
+                                                                    default => 'danger',
+                                                                },
+                                                                'label' => round($value * 100) . '%',
+                                                            ];
+                                                        };
+                                                    @endphp
+
+                                                    <tr>
+                                                        <td>{{ __('default.Document Type') }}:</td>
+                                                        <td>{{ __('default.Frachtbrief') }}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>{{ __('default.Recipient Company') }}:</td>
+                                                        <td class=" d-flex justify-content-between align-items-start">
+                                                            {{ (null !== $process->frachtbrief_recipient_company) ? $process->frachtbrief_recipient_company : __('default.unknown') }}
+                                                            @if($badge = $frachtbriefBadge($process->frachtbrief_recipient_company_percent))
+                                                                <span class="badge text-bg-{{ $badge['class'] }} rounded-pill">{{ $badge['label'] }}</span>
+                                                            @endif
+                                                        </td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>{{ __('default.Pickup Date') }}:</td>
+                                                        <td class=" d-flex justify-content-between align-items-start">
+                                                            {{ (null !== $process->frachtbrief_pickup_date) ? $process->frachtbrief_pickup_date : __('default.unknown') }}
+                                                            @if($badge = $frachtbriefBadge($process->frachtbrief_pickup_date_percent))
+                                                                <span class="badge text-bg-{{ $badge['class'] }} rounded-pill">{{ $badge['label'] }}</span>
+                                                            @endif
+                                                        </td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>{{ __('default.Order Number') }}:</td>
+                                                        <td class=" d-flex justify-content-between align-items-start">
+                                                            {{ (null !== $process->frachtbrief_order_number) ? $process->frachtbrief_order_number : __('default.unknown') }}
+                                                            @if($badge = $frachtbriefBadge($process->frachtbrief_order_number_percent))
+                                                                <span class="badge text-bg-{{ $badge['class'] }} rounded-pill">{{ $badge['label'] }}</span>
+                                                            @endif
+                                                        </td>
+                                                    </tr>
+
+                                                @else
+
                                                 <tr>
                                                     <td>{{ __('default.Company Name') }}:</td>
                                                     <td class=" d-flex justify-content-between align-items-start">
@@ -264,6 +327,9 @@
                                                         <span class="badge text-bg-{{$class}} rounded-pill">{{ $process->invoice_id_certainty * 100 }}%</span>
                                                     </td>
                                                 </tr>
+
+                                                @endif
+
                                                 <tr>
                                                     <td>{{ __('default.Original') }}:</td>
                                                     <td class="d-flex justify-content-between align-items-start">

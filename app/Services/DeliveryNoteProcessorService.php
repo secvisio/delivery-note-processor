@@ -6,6 +6,7 @@ namespace App\Services;
 use App\Jobs\ProcessDeliveryNoteJob;
 use App\Models\Process;
 use App\Neuron\DeliveryNoteAgent;
+use App\Neuron\FrachtbriefAgent;
 use App\Neuron\ProductionOrderAgent;
 use Carbon\Carbon;
 use Exception;
@@ -31,6 +32,23 @@ class DeliveryNoteProcessorService
     private const FIXED_DELIVERY_NOTES_PATH = '/mnt/laufwerk/Lieferscheine';
     private const FIXED_UNKNOWN_PATH = '/mnt/laufwerk/Nicht zugeordnet';
     private const FIXED_PRODUCTION_ORDERS_PATH = '/mnt/laufwerk/Produktionsaufträge';
+    private const FIXED_FRACHTBRIEFE_PATH = '/mnt/laufwerk/Frachtbriefe';
+
+    /**
+     * Value written to `processes.document_type` for a confirmed Frachtbrief.
+     * The delivery-note and production-order branches intentionally leave the
+     * column null, exactly as before this feature existed.
+     */
+    public const DOCUMENT_TYPE_FRACHTBRIEF = 'frachtbrief';
+
+    /**
+     * Cheap, deterministic pre-check used as CORROBORATION only — never on its
+     * own as the classification verdict. Matches an `Order Nummer`-ish label
+     * (including the common OCR corruptions `0rder`, `Numner`, `Nr.`, and a
+     * missing space) followed by a `YYMMDD-NN` value within a short distance.
+     */
+    private const FRACHTBRIEF_ORDER_LABEL_PATTERN =
+        '/[o0]rder\s*[-]?\s*(?:nummer|numner|nunmer|nr\.?|no\.?)\s*[:.]?\s*\d{6}\s*[-\x{2010}-\x{2015}\x{2212}]?\s*\d{2}/iu';
 
     /**
      * @var string|null
@@ -104,6 +122,75 @@ class DeliveryNoteProcessorService
             Return a single JSON object with EXACTLY these keys, no markdown, no extra prose:
 
             {"is_production_order": true|false, "auftragsnummer": "..."|null, "produktion": "..."|null, "missing_values": [...], "confidence": "high"|"medium"|"low", "reason": "..."}
+
+            OCR text follows:
+
+            {{ $ocrContent }}
+        ';
+
+    /**
+     * Prompt for the Frachtbrief (freight waybill) classification + extraction
+     * agent. Runs FIRST, before the production-order agent, because its
+     * identifying signal — an `Order Nummer` shaped like `YYMMDD-NN` — is far
+     * more specific than the production-order layout heuristics.
+     *
+     * The prompt is deliberately strict about NOT treating a generic
+     * Bestellnummer/Auftragsnummer as proof: ordinary Lieferscheine routinely
+     * carry a customer order reference, and a false positive here would divert
+     * a delivery note into the Frachtbriefe folder. When the agent is unsure it
+     * must answer false — the processor then falls through to the untouched
+     * production-order / delivery-note flow.
+     *
+     * @var string
+     */
+    protected string $frachtbriefPrompt = '
+            You will receive plain text parsed by an OCR scanner from a scanned document.
+
+            Decide independently:
+              (1) whether the document is a Frachtbrief (freight waybill / consignment note)
+              (2) which of three values, if any, can be reliably extracted
+
+            PRIMARY IDENTIFYING SIGNAL
+            A Frachtbrief carries an "Order Nummer" field whose value looks like YYMMDD-NN,
+            for example "260630-01", "260701-15", "260915-03". The label may be corrupted by
+            OCR; treat all of these as the same field:
+              Order Nummer, Ordernummer, Order Nr., Order-Nr., 0rder Nummer, 0rder Numner
+
+            SUPPORTING SIGNALS (corroboration, not proof on their own)
+              Abholdatum, Empfaenger, Empfänger, Absender, Frachtfuehrer, Frachtführer,
+              Ladestelle, Entladestelle, CMR
+
+            NEGATIVE RULE — READ CAREFULLY
+            A generic "Bestellnummer", "Auftragsnummer", "Kundenauftragsnummer" or a bare
+            "Order" reference does NOT make a document a Frachtbrief. Ordinary delivery notes
+            (Lieferscheine) and invoices frequently contain a customer order reference. Set
+            is_frachtbrief to false unless you find an Order Nummer in the YYMMDD-NN shape, or
+            the document is otherwise unmistakably a freight waybill.
+
+            VALUES TO EXTRACT
+              - order_number      : the Order Nummer, keep the hyphen, e.g. "260630-01"
+              - pickup_date       : the Abholdatum, NORMALIZED to YYYY-MM-DD
+                                    ("30.06.2026" and "30/06/2026" both become "2026-06-30")
+              - recipient_company : the receiving company (Firma / Empfaengername)
+
+            RULES
+              - Allow minor OCR mistakes (O vs 0, I vs 1, missing colons or whitespace).
+              - Do NOT invent, guess, complete or enrich values. In particular, never use
+                outside knowledge to expand or correct a company name — use only text that is
+                actually present in the OCR result.
+              - If a value cannot be confidently extracted, return null for BOTH its "value"
+                and its "confidence".
+              - is_frachtbrief can be true even when some values are unreadable, as long as the
+                layout/structure/keywords clearly indicate a Frachtbrief.
+              - Every confidence is a number between 0 and 1, up to 2 digits after the dot
+                (1 = 100% certain, 0.15 = 15% certain).
+              - "document_confidence" is your certainty about the is_frachtbrief decision.
+                Use a low value when is_frachtbrief is false.
+
+            Return a single JSON object with EXACTLY these keys, no markdown, no extra prose,
+            no comments:
+
+            {"is_frachtbrief": true|false, "document_confidence": 0.96, "order_number": {"value": "260630-01", "confidence": 0.98}, "pickup_date": {"value": "2026-06-30", "confidence": 0.92}, "recipient_company": {"value": "Musterfirma GmbH", "confidence": 0.91}}
 
             OCR text follows:
 
@@ -206,6 +293,23 @@ class DeliveryNoteProcessorService
             $process->update([
                 'ocr_result' => Str::limit($ocrContent, $this->getMaxOcrChatToSave(), ''),
             ]);
+
+            // Frachtbrief is checked FIRST because its identifying signal (an
+            // `Order Nummer` shaped like YYMMDD-NN) is much more specific than
+            // the production-order heuristics. Every failure mode of this block
+            // — agent exception, malformed JSON, low confidence, no order-number
+            // evidence — yields null/false and falls through to the untouched
+            // production-order and delivery-note flow below.
+            $frachtbriefResult = $this->extractFrachtbrief($ocrContent);
+            if ($frachtbriefResult !== null
+                && $this->isConfirmedFrachtbrief($frachtbriefResult['content'], $ocrContent)) {
+                return $this->handleFrachtbrief(
+                    $process,
+                    $frachtbriefResult['message'],
+                    $frachtbriefResult['content'],
+                    $ocrContent
+                );
+            }
 
             $productionOrderResult = $this->extractProductionOrder($ocrContent);
             if ($productionOrderResult !== null && ($productionOrderResult['content']->is_production_order ?? false) === true) {
@@ -317,6 +421,317 @@ class DeliveryNoteProcessorService
         }
 
         return $process;
+    }
+
+    /**
+     * Frachtbrief branch. Runs only when isConfirmedFrachtbrief() agreed, i.e.
+     * the agent said `is_frachtbrief: true`, its document confidence cleared
+     * the threshold, AND an order-number-shaped value was found (either in the
+     * extraction or in the raw OCR text).
+     *
+     * Routing (ad-hoc rules for this feature only — the delivery-note and
+     * production-order rules are untouched):
+     *   - order number extracted        → Frachtbriefe folder
+     *   - order number NOT extracted    → existing unknown folder, because the
+     *                                     order number is the document's
+     *                                     primary identifier and without it the
+     *                                     file cannot be found again
+     * A missing company or pickup date does NOT divert the file; those segments
+     * collapse to the `xxxxxx` placeholder, mirroring the production-order
+     * fallback behaviour.
+     */
+    private function handleFrachtbrief(
+        Process $process,
+        Message $message,
+        object  $messageContent,
+        string  $ocrContent
+    ): Process
+    {
+        // Reuse the existing canonical-company pipeline so OCR variants of the
+        // same recipient collapse onto the slug already used for that company
+        // elsewhere. A null result means "not trusted/matched" and renders as
+        // the xxxxxx placeholder — exactly as in the delivery-note branch.
+        $resolvedCompanyName = $this->companyResolver->resolve(
+            $messageContent->recipient_company ?? null,
+            $messageContent->recipient_company_percent ?? null,
+            $ocrContent
+        );
+
+        $orderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
+        $pickupDate = $this->resolveFrachtbriefPickupDate($process, $messageContent, $orderNumber);
+
+        $destination = $this->resolveFrachtbriefDestination($process, $resolvedCompanyName, $pickupDate, $orderNumber);
+
+        $process->document_type = self::DOCUMENT_TYPE_FRACHTBRIEF;
+        // The RAW agent name is persisted (not the canonical slug), matching how
+        // the delivery-note branch stores company_name — the slug is visible in
+        // the resulting filename.
+        $process->frachtbrief_recipient_company = $messageContent->recipient_company ?? null;
+        $process->frachtbrief_recipient_company_percent = $messageContent->recipient_company_percent ?? null;
+        $process->frachtbrief_order_number = $orderNumber !== '' ? $orderNumber : null;
+        $process->frachtbrief_order_number_percent = $messageContent->order_number_percent ?? null;
+        $process->frachtbrief_pickup_date = $pickupDate !== '' ? $pickupDate : null;
+        $process->frachtbrief_pickup_date_percent = $messageContent->pickup_date_percent ?? null;
+        $process->target_file_path = $destination['folder'] . DIRECTORY_SEPARATOR . $destination['filename'];
+        $process->status = 'finished';
+        $process->input_token = $message->getUsage()?->inputTokens;
+        $process->output_token = $message->getUsage()?->outputTokens;
+        $process->total_token = $message->getUsage()?->getTotal();
+        $process->save();
+
+        try {
+            $this->disk->copy(
+                $process->source_file_path,
+                $destination['folder'] . DIRECTORY_SEPARATOR . $destination['filename']
+            );
+
+            $this->copyToFixedPath(
+                $process->source_file_path,
+                $destination['is_unknown'] ? self::FIXED_UNKNOWN_PATH : self::FIXED_FRACHTBRIEFE_PATH,
+                $destination['filename']
+            );
+        } catch (Exception $e) {
+            $process->update([
+                'status' => 'failed',
+                'failed_message' => Str::limit($e->getMessage(), 1000),
+                'failed_trace' => $e->getTraceAsString(),
+            ]);
+
+            Log::error($e->getMessage() . ' - ' . $e->getTraceAsString());
+        }
+
+        return $process;
+    }
+
+    /**
+     * Pure routing decision for a Frachtbrief: folder, filename and the unknown
+     * flag. Extracted so it can be tested without OCR, the agent or the disk —
+     * the same seam resolveDeliveryDestination() provides for delivery notes.
+     *
+     * @return array{folder: string, filename: string, is_unknown: bool}
+     */
+    public function resolveFrachtbriefDestination(
+        Process $process,
+        ?string $resolvedCompanyName,
+        ?string $pickupDate,
+        ?string $orderNumber
+    ): array
+    {
+        $orderNumber = FilenameNormalizer::sanitizeOrderNumber($orderNumber);
+
+        // The order number is the Frachtbrief's primary identifier: without it
+        // the file needs a human, so it goes to the existing unknown folder.
+        $isUnknown = $orderNumber === '';
+
+        return [
+            'folder' => $isUnknown
+                ? config('delivery_note_processor.unknown_folder')
+                : config('delivery_note_processor.frachtbrief_folder'),
+            'filename' => FileRenamingService::generateFrachtbrief(
+                $resolvedCompanyName,
+                $pickupDate,
+                $orderNumber,
+                Str::afterLast($process->source_file_path, '.'),
+                Carbon::now()->format('YmdHis'),
+            ),
+            'is_unknown' => $isUnknown,
+        ];
+    }
+
+    /**
+     * Decide the pickup-date filename segment.
+     *
+     * Precedence: an explicitly extracted Abholdatum always wins. Only when it
+     * is absent/unparseable is the date derived from the `YYMMDD` prefix of the
+     * order number. Both paths are checkdate()-validated, so an impossible date
+     * yields '' and the caller renders the xxxxxx placeholder.
+     *
+     * Both the derivation and a disagreement between the two sources are
+     * logged, so the reliability of the YYMMDD-equals-Abholdatum assumption can
+     * be assessed from production logs before anything depends on it further.
+     */
+    private function resolveFrachtbriefPickupDate(Process $process, object $messageContent, string $orderNumber): string
+    {
+        $explicit = FilenameNormalizer::sanitizePickupDate($messageContent->pickup_date ?? null);
+        $derived = FilenameNormalizer::pickupDateFromOrderNumber($orderNumber);
+
+        if ($explicit !== '' && $derived !== '' && $explicit !== $derived) {
+            Log::warning('Frachtbrief pickup-date mismatch; using the explicitly extracted Abholdatum.', [
+                'process_id' => $process->id,
+                'source_file_path' => $process->source_file_path,
+                'explicit_pickup_date' => $explicit,
+                'order_number_derived_date' => $derived,
+                'order_number' => $orderNumber,
+            ]);
+        }
+
+        if ($explicit !== '') {
+            return $explicit;
+        }
+
+        if ($derived !== '') {
+            Log::info('Frachtbrief pickup date derived from the order number.', [
+                'process_id' => $process->id,
+                'source_file_path' => $process->source_file_path,
+                'order_number' => $orderNumber,
+                'derived_pickup_date' => $derived,
+            ]);
+
+            return $derived;
+        }
+
+        return '';
+    }
+
+    /**
+     * Run the Frachtbrief agent and return the message + parsed content, or
+     * null if the response is unusable.
+     *
+     * Every failure is swallowed into null so a Frachtbrief-detection problem
+     * can never break a document that previously processed fine: agent
+     * exceptions, non-string content, invalid JSON and structurally invalid
+     * payloads all fall through to the existing production-order flow.
+     *
+     * @return array{message: Message, content: object}|null
+     */
+    private function extractFrachtbrief(string $ocrContent): ?array
+    {
+        try {
+            $message = $this->runAgent($this->getFrachtbriefPrompt(), $ocrContent, FrachtbriefAgent::class);
+        } catch (Throwable $e) {
+            Log::warning('Frachtbrief agent failed, falling back to the existing flow: ' . $e->getMessage());
+            return null;
+        }
+
+        try {
+            $raw = $message->getContent();
+            $content = is_string($raw) ? $this->normalizeFrachtbriefContent(json_decode($raw)) : null;
+        } catch (Throwable $e) {
+            Log::warning('Frachtbrief response could not be parsed, falling back to the existing flow: ' . $e->getMessage());
+            return null;
+        }
+
+        if ($content === null) {
+            return null;
+        }
+
+        return ['message' => $message, 'content' => $content];
+    }
+
+    /**
+     * Whether a normalized Frachtbrief payload is trustworthy enough to
+     * intercept the document. ALL of the following must hold:
+     *
+     *   1. `is_frachtbrief` is the boolean true (a "true" STRING is rejected —
+     *      normalizeFrachtbriefContent() only accepts real booleans, matching
+     *      the existing production-order convention)
+     *   2. `document_confidence` is present and at/above the project threshold
+     *   3. corroborating evidence for the order number exists — either an
+     *      extracted value in the expected YYMMDD-NN shape, or an
+     *      `Order Nummer`-style label with such a value in the raw OCR text
+     *
+     * Anything less returns false and the document continues through the
+     * untouched production-order / delivery-note flow.
+     */
+    public function isConfirmedFrachtbrief(?object $messageContent, string $ocrContent): bool
+    {
+        if ($messageContent === null) {
+            return false;
+        }
+
+        if (($messageContent->is_frachtbrief ?? null) !== true) {
+            return false;
+        }
+
+        $confidence = $messageContent->document_confidence ?? null;
+        if ($confidence === null || $confidence < $this->getThreshold()) {
+            return false;
+        }
+
+        if (FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null) !== '') {
+            return true;
+        }
+
+        return preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1;
+    }
+
+    /**
+     * Validate the Frachtbrief JSON defensively, mirroring
+     * normalizeProductionOrderContent(). The agent's reply is not trusted:
+     * only a stdClass (or the first stdClass of an array) carrying a REAL
+     * boolean `is_frachtbrief` is accepted — the string "true" is not.
+     *
+     * The three extracted fields arrive as `{value, confidence}` objects; a
+     * bare scalar is tolerated as the value with a null confidence. Values are
+     * coerced to string|null and confidences to a float in [0,1] or null, so
+     * downstream code can rely on the shape.
+     */
+    public function normalizeFrachtbriefContent(mixed $content): ?object
+    {
+        $object = $this->getObjectFromContent($content);
+        if ($object === null) {
+            return null;
+        }
+
+        if (!property_exists($object, 'is_frachtbrief') || !is_bool($object->is_frachtbrief)) {
+            return null;
+        }
+
+        $normalized = new stdClass();
+        $normalized->is_frachtbrief = $object->is_frachtbrief;
+        $normalized->document_confidence = $this->coerceConfidence($object->document_confidence ?? null);
+
+        foreach (['order_number', 'pickup_date', 'recipient_company'] as $field) {
+            $node = $object->{$field} ?? null;
+
+            $normalized->{$field} = $this->coerceNullableString($this->extractFieldValue($node));
+            $normalized->{$field . '_percent'} = $this->coerceConfidence($this->extractFieldConfidence($node));
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Pull the `value` out of a `{value, confidence}` node, tolerating an agent
+     * that emitted a bare scalar instead of the documented object shape.
+     */
+    private function extractFieldValue(mixed $node): mixed
+    {
+        if ($node instanceof stdClass) {
+            return $node->value ?? null;
+        }
+
+        if (is_string($node) || is_int($node) || is_float($node)) {
+            return $node;
+        }
+
+        return null;
+    }
+
+    private function extractFieldConfidence(mixed $node): mixed
+    {
+        return $node instanceof stdClass ? ($node->confidence ?? null) : null;
+    }
+
+    /**
+     * Coerce a self-reported certainty into a float within [0,1], or null when
+     * it is absent, non-numeric or out of range. Out-of-range values are
+     * treated as unusable rather than clamped: a model that answers "96" for a
+     * 0..1 field is not reliably saying 96%.
+     */
+    private function coerceConfidence(mixed $value): ?float
+    {
+        if ($value === null || $value === '' || !is_numeric($value)) {
+            return null;
+        }
+
+        $confidence = (float)$value;
+
+        if ($confidence < 0 || $confidence > 1) {
+            return null;
+        }
+
+        return $confidence;
     }
 
     /**
@@ -625,6 +1040,24 @@ class DeliveryNoteProcessorService
     }
 
     /**
+     * @return string
+     */
+    public function getFrachtbriefPrompt(): string
+    {
+        return $this->frachtbriefPrompt;
+    }
+
+    /**
+     * @param string $frachtbriefPrompt
+     * @return $this
+     */
+    public function setFrachtbriefPrompt(string $frachtbriefPrompt): self
+    {
+        $this->frachtbriefPrompt = $frachtbriefPrompt;
+        return $this;
+    }
+
+    /**
      * @return float
      */
     public function getThreshold(): float
@@ -775,9 +1208,13 @@ class DeliveryNoteProcessorService
      * (the bundled tesseract_ocr library exits its wait loop on timeout but
      * never reaps the child — Symfony Process sends SIGTERM/SIGKILL).
      *
+     * Visibility is `protected` (not private) purely so tests can substitute a
+     * canned OCR result and exercise the branch routing without a real
+     * Tesseract binary. Behaviour is unchanged.
+     *
      * @throws TesseractOcrException
      */
-    private function runOCR(string $imageFile): string
+    protected function runOCR(string $imageFile): string
     {
         $absolutePath = $this->absolutePath($imageFile);
 
@@ -814,11 +1251,15 @@ class DeliveryNoteProcessorService
     /**
      * @param string $prompt
      * @param string $ocrContent
+     * Visibility is `protected` (not private) purely so tests can substitute
+     * canned agent responses instead of calling the real OpenAI API.
+     * Behaviour is unchanged.
+     *
      * @param class-string<Agent> $agentClass
      * @return Message
      * @throws Throwable
      */
-    private function runAgent(string $prompt, string $ocrContent, string $agentClass = DeliveryNoteAgent::class): Message
+    protected function runAgent(string $prompt, string $ocrContent, string $agentClass = DeliveryNoteAgent::class): Message
     {
         $prompt = str_replace('{{ $ocrContent }}', $ocrContent, $prompt);
         return $agentClass::make()->chat(new UserMessage($prompt));

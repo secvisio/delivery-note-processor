@@ -20,6 +20,14 @@ return [
     'unknown' => 'unknown',
     'Delivery Note ID' => 'Delivery Note ID',
     'Invoice ID' => 'Invoice ID',
+
+    // Frachtbriefe
+    'Document Type' => 'Document Type',
+    'Frachtbrief' => 'Frachtbrief',
+    'Recipient Company' => 'Recipient Company',
+    'Pickup Date' => 'Pickup Date',
+    'Order Number' => 'Order Number',
+
     'Original' => 'Original',
     'Edit Item' => 'Edit Item',
     'Renamed To' => 'Renamed To',
