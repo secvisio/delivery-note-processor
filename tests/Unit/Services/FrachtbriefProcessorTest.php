@@ -327,38 +327,72 @@ it('extracts company, pickup date and order number from a complete frachtbrief',
         ->and((float)$result->frachtbrief_order_number_percent)->toBe(0.98);
 });
 
-it('derives the pickup date from the order number when the abholdatum is missing', function () {
-    Log::shouldReceive('info')
-        ->once()
-        ->withArgs(fn(string $message): bool => str_contains($message, 'derived from the order number'));
-    Log::shouldReceive('info')->zeroOrMoreTimes();
-    Log::shouldReceive('warning')->zeroOrMoreTimes();
-    Log::shouldReceive('error')->zeroOrMoreTimes();
-
+/*
+| Scenario 1 — an order number alone must NEVER become a pickup date.
+|
+| This is the regression guard for the bug: `260630-01` looks like it encodes
+| 2026-06-30, and the implementation used to act on that. It must not.
+*/
+it('leaves the pickup date null when only an order number is present', function () {
     $processor = (new FakeAgentProcessor())
         ->withOcr(FRACHTBRIEF_OCR)
         ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'recipient_company' => ['value' => null, 'confidence' => null],
             'pickup_date' => ['value' => null, 'confidence' => null],
+        ])));
+
+    $result = $processor->run(storedProcess());
+    $filename = basename($result->target_file_path);
+
+    expect($result->frachtbrief_pickup_date)->toBeNull()
+        ->and($result->frachtbrief_pickup_date_percent)->toBeNull()
+        ->and($result->frachtbrief_order_number)->toBe('260630-01')
+        ->and($filename)->toBe('FB_xxxxxx_xxxxxx_260630-01_20260724143025.pdf')
+        // The derived date must appear nowhere.
+        ->and($filename)->not->toContain('2026-06-30')
+        ->and($result->frachtbrief_pickup_date)->not->toBe('2026-06-30');
+});
+
+it('does not derive a pickup date even when the confidence was supplied for a null value', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr(FRACHTBRIEF_OCR)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'pickup_date' => ['value' => null, 'confidence' => 0.9],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    expect($result->frachtbrief_pickup_date)->toBeNull()
+        ->and($result->frachtbrief_pickup_date_percent)->toBeNull()
+        ->and(basename($result->target_file_path))
+        ->toBe('FB_musterfirma-gmbh_xxxxxx_260630-01_20260724143025.pdf');
+});
+
+/*
+| Scenario 2 — an explicitly stated Abholdatum is still normalized and used.
+*/
+it('uses and normalizes an explicitly extracted abholdatum', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr(FRACHTBRIEF_OCR)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'recipient_company' => ['value' => null, 'confidence' => null],
+            'pickup_date' => ['value' => '30.06.2026', 'confidence' => 0.92],
         ])));
 
     $result = $processor->run(storedProcess());
 
     expect($result->frachtbrief_pickup_date)->toBe('2026-06-30')
-        ->and(basename($result->target_file_path))->toBe('FB_musterfirma-gmbh_2026-06-30_260630-01.pdf');
+        ->and((float)$result->frachtbrief_pickup_date_percent)->toBe(0.92)
+        ->and(basename($result->target_file_path))
+        ->toBe('FB_xxxxxx_2026-06-30_260630-01_20260724143025.pdf');
 });
 
-it('prefers the explicit abholdatum over the order-derived date and logs the mismatch', function () {
-    Log::shouldReceive('warning')
-        ->once()
-        ->withArgs(fn(string $message): bool => str_contains($message, 'pickup-date mismatch'));
-    Log::shouldReceive('warning')->zeroOrMoreTimes();
-    Log::shouldReceive('info')->zeroOrMoreTimes();
-    Log::shouldReceive('error')->zeroOrMoreTimes();
-
+it('keeps an explicit pickup date that disagrees with the order-number digits', function () {
+    // The order number starts 260630; the document says 2026-07-02. The
+    // document wins because the order number is not a date source at all.
     $processor = (new FakeAgentProcessor())
         ->withOcr(FRACHTBRIEF_OCR)
         ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
-            // order number implies 2026-06-30, the document says otherwise
             'pickup_date' => ['value' => '2026-07-02', 'confidence' => 0.9],
         ])));
 
@@ -366,6 +400,27 @@ it('prefers the explicit abholdatum over the order-derived date and logs the mis
 
     expect($result->frachtbrief_pickup_date)->toBe('2026-07-02')
         ->and(basename($result->target_file_path))->toBe('FB_musterfirma-gmbh_2026-07-02_260630-01.pdf');
+});
+
+/*
+| Scenario 3 — an invalid explicit date must NOT fall back to derivation.
+*/
+it('falls back to the placeholder, not the order number, for an impossible abholdatum', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr(FRACHTBRIEF_OCR)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'recipient_company' => ['value' => null, 'confidence' => null],
+            // 31 February does not exist
+            'pickup_date' => ['value' => '31.02.2026', 'confidence' => 0.88],
+        ])));
+
+    $result = $processor->run(storedProcess());
+    $filename = basename($result->target_file_path);
+
+    expect($result->frachtbrief_pickup_date)->toBeNull()
+        ->and($result->frachtbrief_pickup_date_percent)->toBeNull()
+        ->and($filename)->toBe('FB_xxxxxx_xxxxxx_260630-01_20260724143025.pdf')
+        ->and($filename)->not->toContain('2026-06-30');
 });
 
 it('uses the xxxxxx placeholder when the recipient company cannot be resolved', function () {
@@ -386,7 +441,8 @@ it('uses the xxxxxx placeholder when no valid pickup date can be determined', fu
     $processor = (new FakeAgentProcessor())
         ->withOcr(FRACHTBRIEF_OCR)
         ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
-            // 999999-01 has no valid YYMMDD prefix, so nothing can be derived
+            // An order number whose digits are not date-shaped at all — the
+            // placeholder outcome must be identical to the date-shaped case.
             'order_number' => ['value' => '999999-01', 'confidence' => 0.9],
             'pickup_date' => ['value' => null, 'confidence' => null],
         ])));

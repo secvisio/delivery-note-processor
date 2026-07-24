@@ -173,6 +173,22 @@ class DeliveryNoteProcessorService
                                     ("30.06.2026" and "30/06/2026" both become "2026-06-30")
               - recipient_company : the receiving company (Firma / Empfaengername)
 
+            PICKUP DATE — STRICT SOURCE RULE
+            Return a pickup_date ONLY when the document explicitly states a pickup /
+            collection date under a label that clearly means exactly that, such as:
+              Abholdatum, Abhol-Datum, Datum der Abholung, Pickup Date, Collection Date
+
+            NEVER produce a pickup_date from any of the following:
+              - the order number. The leading digits of "260630-01" may look like a date,
+                but they are part of the order number and nothing else. Do NOT convert
+                them, and do NOT let them influence pickup_date in any way.
+              - a document creation date, print date, invoice date or delivery date
+              - the current date, or a date taken from the file name
+              - any other guess or inference
+
+            If no explicit pickup date is present, return null for BOTH pickup_date.value
+            and pickup_date.confidence. A missing pickup date is a normal, expected case.
+
             RULES
               - Allow minor OCR mistakes (O vs 0, I vs 1, missing colons or whitespace).
               - Do NOT invent, guess, complete or enrich values. In particular, never use
@@ -458,7 +474,7 @@ class DeliveryNoteProcessorService
         );
 
         $orderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
-        $pickupDate = $this->resolveFrachtbriefPickupDate($process, $messageContent, $orderNumber);
+        $pickupDate = $this->resolveFrachtbriefPickupDate($messageContent);
 
         $destination = $this->resolveFrachtbriefDestination($process, $resolvedCompanyName, $pickupDate, $orderNumber);
 
@@ -471,7 +487,12 @@ class DeliveryNoteProcessorService
         $process->frachtbrief_order_number = $orderNumber !== '' ? $orderNumber : null;
         $process->frachtbrief_order_number_percent = $messageContent->order_number_percent ?? null;
         $process->frachtbrief_pickup_date = $pickupDate !== '' ? $pickupDate : null;
-        $process->frachtbrief_pickup_date_percent = $messageContent->pickup_date_percent ?? null;
+        // The confidence is only meaningful alongside a usable date: if the
+        // Abholdatum was absent or not a real calendar date, the agent's
+        // self-reported certainty describes nothing and is dropped with it.
+        $process->frachtbrief_pickup_date_percent = $pickupDate !== ''
+            ? ($messageContent->pickup_date_percent ?? null)
+            : null;
         $process->target_file_path = $destination['folder'] . DIRECTORY_SEPARATOR . $destination['filename'];
         $process->status = 'finished';
         $process->input_token = $message->getUsage()?->inputTokens;
@@ -541,46 +562,22 @@ class DeliveryNoteProcessorService
     /**
      * Decide the pickup-date filename segment.
      *
-     * Precedence: an explicitly extracted Abholdatum always wins. Only when it
-     * is absent/unparseable is the date derived from the `YYMMDD` prefix of the
-     * order number. Both paths are checkdate()-validated, so an impossible date
-     * yields '' and the caller renders the xxxxxx placeholder.
+     * The ONLY accepted source is an Abholdatum the agent explicitly found in
+     * the document. The value is checkdate()-validated, so an impossible date
+     * such as `31.02.2026` yields '' and the caller renders the xxxxxx
+     * placeholder.
      *
-     * Both the derivation and a disagreement between the two sources are
-     * logged, so the reliability of the YYMMDD-equals-Abholdatum assumption can
-     * be assessed from production logs before anything depends on it further.
+     * DO NOT derive this value from the order number. The six leading digits of
+     * an order number like `260630-01` resemble a YYMMDD date, but that
+     * resemblance is coincidental — those digits are part of the order number
+     * and carry no pickup-date meaning. An earlier version of this method used
+     * them as a fallback and produced filenames asserting a pickup date the
+     * document never stated. Missing is missing: return '' and let the
+     * placeholder say so honestly.
      */
-    private function resolveFrachtbriefPickupDate(Process $process, object $messageContent, string $orderNumber): string
+    private function resolveFrachtbriefPickupDate(object $messageContent): string
     {
-        $explicit = FilenameNormalizer::sanitizePickupDate($messageContent->pickup_date ?? null);
-        $derived = FilenameNormalizer::pickupDateFromOrderNumber($orderNumber);
-
-        if ($explicit !== '' && $derived !== '' && $explicit !== $derived) {
-            Log::warning('Frachtbrief pickup-date mismatch; using the explicitly extracted Abholdatum.', [
-                'process_id' => $process->id,
-                'source_file_path' => $process->source_file_path,
-                'explicit_pickup_date' => $explicit,
-                'order_number_derived_date' => $derived,
-                'order_number' => $orderNumber,
-            ]);
-        }
-
-        if ($explicit !== '') {
-            return $explicit;
-        }
-
-        if ($derived !== '') {
-            Log::info('Frachtbrief pickup date derived from the order number.', [
-                'process_id' => $process->id,
-                'source_file_path' => $process->source_file_path,
-                'order_number' => $orderNumber,
-                'derived_pickup_date' => $derived,
-            ]);
-
-            return $derived;
-        }
-
-        return '';
+        return FilenameNormalizer::sanitizePickupDate($messageContent->pickup_date ?? null);
     }
 
     /**

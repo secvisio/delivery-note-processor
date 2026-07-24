@@ -65,9 +65,12 @@ final class FilenameNormalizer
      *  - a completely dropped hyphen ("26063001"), which is re-inserted
      *
      * Anything that does not end up matching `\d{6}-\d{2}` exactly returns the
-     * empty string, which the caller renders as the `xxxxxx` placeholder. The
-     * six leading digits are NOT date-validated here — that is the separate
-     * concern of pickupDateFromOrderNumber().
+     * empty string, which the caller renders as the `xxxxxx` placeholder.
+     *
+     * The six leading digits are deliberately NOT interpreted. They often look
+     * like a YYMMDD date, but that resemblance is coincidental: the value is
+     * part of the order number and nothing else. Do not add date extraction
+     * here — see resolveFrachtbriefPickupDate() in DeliveryNoteProcessorService.
      */
     public static function sanitizeOrderNumber(?string $orderNumber): string
     {
@@ -122,30 +125,6 @@ final class FilenameNormalizer
         }
 
         return '';
-    }
-
-    /**
-     * Derive the Abholdatum from the `YYMMDD` prefix of a normalized order
-     * number (`260630-01` → `2026-06-30`).
-     *
-     * The two-digit year is expanded into the 2000s: these are freight papers
-     * for the current decade, and there is no in-band signal to distinguish a
-     * century. The resulting triple is checkdate()-validated, so an order
-     * number whose prefix is not a real date (e.g. `269930-01`) yields '' and
-     * the caller falls back to the `xxxxxx` placeholder.
-     *
-     * Expects an ALREADY normalized order number; pass the output of
-     * sanitizeOrderNumber() so the parsing rules live in exactly one place.
-     */
-    public static function pickupDateFromOrderNumber(?string $normalizedOrderNumber): string
-    {
-        $value = (string)$normalizedOrderNumber;
-
-        if (preg_match('/^(\d{2})(\d{2})(\d{2})-\d{2}$/', $value, $m) !== 1) {
-            return '';
-        }
-
-        return self::buildDate(2000 + (int)$m[1], (int)$m[2], (int)$m[3]);
     }
 
     /**

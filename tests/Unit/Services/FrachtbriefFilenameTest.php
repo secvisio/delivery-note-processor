@@ -87,26 +87,26 @@ it('rejects pickup dates that are not real calendar dates', function (?string $i
 
 /*
 |--------------------------------------------------------------------------
-| Pickup date derived from the order number
+| The order number is NEVER a date source
 |--------------------------------------------------------------------------
+|
+| The leading digits of `260630-01` resemble a YYMMDD date, but that is a
+| coincidence: they belong to the order number and carry no pickup-date
+| meaning. Nothing in the normalizer may turn them into one.
 */
 
-it('derives the pickup date from the YYMMDD prefix of the order number', function (string $order, string $expected) {
-    expect(FilenameNormalizer::pickupDateFromOrderNumber($order))->toBe($expected);
-})->with([
-    ['260630-01', '2026-06-30'],
-    ['260701-15', '2026-07-01'],
-    ['260915-03', '2026-09-15'],
-]);
+it('exposes no way to turn an order number into a date', function () {
+    expect(method_exists(FilenameNormalizer::class, 'pickupDateFromOrderNumber'))->toBeFalse();
+});
 
-it('returns no derived date when the order-number prefix is not a real date', function (?string $order) {
-    expect(FilenameNormalizer::pickupDateFromOrderNumber($order))->toBe('');
+it('does not read an order number as a pickup date', function (string $order) {
+    expect(FilenameNormalizer::sanitizePickupDate($order))->toBe('');
 })->with([
-    null,
-    '',
-    '269930-01',   // month 99
-    '260631-01',   // June has no 31st
-    '260630',      // not a full order number
+    '260630-01',
+    '260701-15',
+    '260915-03',
+    '260630',
+    '26063001',
 ]);
 
 /*
