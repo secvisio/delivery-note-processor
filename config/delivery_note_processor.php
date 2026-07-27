@@ -58,6 +58,17 @@ return [
     | order number could NOT be extracted goes to `unknown_folder` instead —
     | the order number is the document's primary identifier.
     |
+    | Within this base folder, confirmed Frachtbriefe are filed into fixed,
+    | customer-specific subfolders decided deterministically in PHP from the
+    | recipient company name (DeliveryNoteProcessorService::resolveFrachtbrief-
+    | Subfolder): `Rhenus`, `UPS` and `Sonstige`. These subfolders are NOT
+    | separate env vars. For the fixed production path
+    | (/mnt/laufwerk/Frachtbriefe) the three subfolders must exist before
+    | deployment — the application never creates or chmods them:
+    |     /mnt/laufwerk/Frachtbriefe/Rhenus
+    |     /mnt/laufwerk/Frachtbriefe/UPS
+    |     /mnt/laufwerk/Frachtbriefe/Sonstige
+    |
     */
 
     'frachtbrief_folder' => env('FRACHTBRIEFE_TARGET_FOLDER', 'Frachtbriefe'),

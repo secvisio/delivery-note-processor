@@ -467,8 +467,9 @@ it('writes a complete frachtbrief into the configured frachtbrief folder', funct
 
     $result = $processor->run(storedProcess());
 
+    // "Musterfirma GmbH" matches neither carrier → Sonstige subfolder.
     $expected = config('delivery_note_processor.frachtbrief_folder')
-        . '/FB_musterfirma-gmbh_2026-06-30_260630-01.pdf';
+        . '/Sonstige/FB_musterfirma-gmbh_2026-06-30_260630-01.pdf';
 
     expect($result->target_file_path)->toBe($expected)
         ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($expected))->toBeTrue();
@@ -502,7 +503,8 @@ it('resolves the frachtbrief destination without touching ocr, the agent or the 
     $destination = $service->resolveFrachtbriefDestination($process, 'musterfirma', '2026-06-30', '260630-01');
 
     expect($destination['is_unknown'])->toBeFalse()
-        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder'))
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Sonstige')
+        ->and($destination['subfolder'])->toBe('Sonstige')
         ->and($destination['filename'])->toBe('FB_musterfirma_2026-06-30_260630-01.jpg');
 });
 
@@ -587,4 +589,163 @@ it('accepts a frachtbrief payload wrapped in a single-element array', function (
 
     expect($normalized)->not->toBeNull()
         ->and($normalized->is_frachtbrief)->toBeFalse();
+});
+
+/*
+|--------------------------------------------------------------------------
+| Frachtbrief subfolder routing (Rhenus / UPS / Sonstige)
+|--------------------------------------------------------------------------
+*/
+
+it('routes Rhenus recipient companies to the Rhenus subfolder', function (string $company) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder($company))->toBe('Rhenus');
+})->with([
+    'Rhenus',
+    'Rhenus Logistics GmbH',
+    'RHENUS WAREHOUSING',
+    'Rhenus Warehousing Solutions GmbH',
+    'RHENUS SE & Co. KG',
+    'rhenus-logistics',                 // resolved slug shape
+]);
+
+it('routes UPS recipient companies to the UPS subfolder', function (string $company) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder($company))->toBe('UPS');
+})->with([
+    'UPS',
+    'UPS Deutschland',
+    'ups logistics',
+    'United Parcel Service (UPS)',
+    'ups-deutschland',                  // resolved slug shape
+]);
+
+it('routes everything else to the Sonstige subfolder', function (?string $company) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder($company))->toBe('Sonstige');
+})->with([
+    'DHL',
+    'Musterfirma GmbH',
+    'xxxxxx',                           // filename placeholder
+    null,                               // missing company
+    '',                                 // empty company
+]);
+
+it('resolves a Rhenus destination inside the frachtbrief base folder', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination($process, 'rhenus-logistics', '2026-07-27', '260727-01');
+
+    expect($destination['is_unknown'])->toBeFalse()
+        ->and($destination['subfolder'])->toBe('Rhenus')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Rhenus')
+        ->and($destination['filename'])->toBe('FB_rhenus-logistics_2026-07-27_260727-01.pdf');
+});
+
+it('resolves a UPS destination inside the frachtbrief base folder', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination($process, 'ups-deutschland', '2026-07-27', '260727-02');
+
+    expect($destination['is_unknown'])->toBeFalse()
+        ->and($destination['subfolder'])->toBe('UPS')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/UPS')
+        ->and($destination['filename'])->toBe('FB_ups-deutschland_2026-07-27_260727-02.pdf');
+});
+
+it('falls back to the raw recipient name for routing when no canonical name resolved', function () {
+    // The canonical resolver returned null (carrier absent from the company
+    // table), so the filename company segment is the xxxxxx placeholder — but
+    // the raw extracted name still routes the file to the Rhenus subfolder.
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination($process, null, '2026-07-27', '260727-05', 'Rhenus Logistics GmbH');
+
+    expect($destination['subfolder'])->toBe('Rhenus')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Rhenus')
+        // xxxxxx company segment → uniqueness timestamp appended by the renamer.
+        ->and($destination['filename'])->toBe('FB_xxxxxx_2026-07-27_260727-05_20260724143025.pdf');
+});
+
+it('routes a missing recipient company to the Sonstige subfolder', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination($process, null, '2026-07-27', '260727-06', null);
+
+    expect($destination['subfolder'])->toBe('Sonstige')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Sonstige')
+        ->and($destination['filename'])->toBe('FB_xxxxxx_2026-07-27_260727-06_20260724143025.pdf');
+});
+
+it('keeps a Frachtbrief without an order number in the unknown folder, not Sonstige', function () {
+    // Even for a Rhenus recipient, a missing order number routes to the
+    // existing unknown folder — subfolder routing must NOT apply here.
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination($process, 'rhenus-logistics', '2026-07-27', null, 'Rhenus Logistics GmbH');
+
+    expect($destination['is_unknown'])->toBeTrue()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.unknown_folder'))
+        ->and($destination['folder'])->not->toContain('Sonstige');
+});
+
+/*
+| Full-pipeline destination checks for the two carriers, mirroring the existing
+| "writes a complete frachtbrief into the configured frachtbrief folder" test.
+*/
+
+it('writes a Rhenus frachtbrief into the Rhenus subfolder with an unchanged filename', function () {
+    $ocr = "Order Nummer: 260630-01\nEmpfaenger: Rhenus Logistics GmbH\nAbholdatum: 30.06.2026\n";
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'recipient_company' => ['value' => 'Rhenus Logistics GmbH', 'confidence' => 0.95],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    $folder = config('delivery_note_processor.frachtbrief_folder') . '/Rhenus';
+
+    expect($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and(dirname($result->target_file_path))->toBe($folder)
+        ->and(basename($result->target_file_path))->toBe('FB_rhenus-logistics-gmbh_2026-06-30_260630-01.pdf')
+        ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($result->target_file_path))->toBeTrue();
+});
+
+it('writes a UPS frachtbrief into the UPS subfolder with an unchanged filename', function () {
+    $ocr = "Order Nummer: 260630-01\nEmpfaenger: UPS Deutschland\nAbholdatum: 30.06.2026\n";
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'recipient_company' => ['value' => 'UPS Deutschland', 'confidence' => 0.95],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    $folder = config('delivery_note_processor.frachtbrief_folder') . '/UPS';
+
+    expect($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and(dirname($result->target_file_path))->toBe($folder)
+        ->and(basename($result->target_file_path))->toBe('FB_ups-deutschland_2026-06-30_260630-01.pdf')
+        ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($result->target_file_path))->toBeTrue();
 });
