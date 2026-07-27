@@ -207,7 +207,10 @@ return [
             'maxJobs' => 0,
             'memory' => 128,
             'tries' => 1,
-            'timeout' => 180,
+            // Must stay in sync with ProcessDeliveryNoteJob::$timeout (240s),
+            // which covers Tesseract (120s) plus three 30s agent calls
+            // (Frachtbrief, ProductionOrder, DeliveryNote) plus margin.
+            'timeout' => 240,
             'nice' => 10,
         ],
     ],

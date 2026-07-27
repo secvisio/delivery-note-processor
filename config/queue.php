@@ -40,7 +40,11 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // Must stay above ProcessDeliveryNoteJob::$timeout (240s), otherwise
+            // the queue re-releases a document while it is still being
+            // processed. The redis connection below (600s) already satisfies
+            // this; production runs on redis, this default covers local runs.
+            'retry_after' => (int)env('DB_QUEUE_RETRY_AFTER', 300),
             'after_commit' => false,
         ],
 

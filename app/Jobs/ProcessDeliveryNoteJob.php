@@ -20,7 +20,26 @@ class ProcessDeliveryNoteJob implements ShouldQueue, ShouldBeUnique
 
     public int $tries = 1;
 
-    public int $timeout = 180;
+    /**
+     * Worst-case wall clock for one document, which this must stay above:
+     *
+     *   Tesseract                                     120s
+     *   FrachtbriefAgent      (HTTP timeout)           30s
+     *   ProductionOrderAgent  (HTTP timeout)           30s
+     *   DeliveryNoteAgent     (HTTP timeout)           30s
+     *                                                -----
+     *                                                 210s
+     *
+     * Was 180s, which exactly matched the previous two-agent worst case and
+     * left no headroom; the Frachtbrief agent added a third 30s call. Raised to
+     * 240s (210s + margin for PDF conversion and disk IO) rather than shortening
+     * the OCR budget, which would cost recognition quality on slow scans.
+     *
+     * The invariant to preserve is:
+     *   agent timeout (30s) < job timeout (240s) < queue retry_after (600s redis)
+     * and Horizon's supervisor timeout (config/horizon.php) must match this.
+     */
+    public int $timeout = 240;
 
     public int $uniqueFor = 600;
 

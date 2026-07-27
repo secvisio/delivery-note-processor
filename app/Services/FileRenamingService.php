@@ -36,6 +36,8 @@ final class FileRenamingService
 
     public const PRODUCTION_ORDER_PREFIX = 'PA';
 
+    public const FRACHTBRIEF_PREFIX = 'FB';
+
     public const FALLBACK = FilenameNormalizer::FALLBACK_TOKEN;
 
     /**
@@ -98,6 +100,57 @@ final class FileRenamingService
 
         if ($auftrag === '' && $produktion === '') {
             $segments[] = self::resolveTimestamp($data['timestamp'] ?? null);
+        }
+
+        return implode('_', $segments) . '.' . $ext;
+    }
+
+    /**
+     * Build the canonical Frachtbrief filename:
+     *
+     *   FB_{company|xxxxxx}_{pickupDate|xxxxxx}_{orderNumber|xxxxxx}[_{YmdHis}].{ext}
+     *
+     * Unlike the two methods above, the timestamp suffix is appended as soon
+     * as ANY of the three segments falls back to the placeholder. A Frachtbrief
+     * is filed by the combination of all three values, so a single missing one
+     * already makes collisions between two scans plausible — and Flysystem's
+     * copy() overwrites silently, so a collision would destroy the earlier file.
+     *
+     * Segment rules deliberately differ from the delivery-note/production-order
+     * methods and must NOT be routed through sanitizeIdentifier():
+     *  - the order number keeps its structural hyphen (`260630-01`)
+     *  - the pickup date keeps its ISO hyphens (`2026-06-30`)
+     * Both are validated by their dedicated FilenameNormalizer methods, which
+     * are idempotent — passing already-normalized values through is safe.
+     *
+     * The company segment follows the existing project convention (lowercase
+     * hyphenated slug), so it should be fed the canonical `rename_slug` coming
+     * out of CompanyResolverService.
+     *
+     * The literal `FB_` prefix is concatenated last, after sanitization, for
+     * the same reason as `ls_` and `PA_`: no slug or limit pass can swallow it.
+     */
+    public static function generateFrachtbrief(
+        ?string $recipientCompany,
+        ?string $pickupDate,
+        ?string $orderNumber,
+        ?string $extension,
+        ?string $timestamp = null,
+    ): string
+    {
+        $company = FilenameNormalizer::sanitizeCompanyName($recipientCompany);
+        $date = FilenameNormalizer::sanitizePickupDate($pickupDate);
+        $order = FilenameNormalizer::sanitizeOrderNumber($orderNumber);
+        $ext = FilenameNormalizer::sanitizeExtension($extension);
+
+        $companySegment = $company !== '' ? $company : self::FALLBACK;
+        $dateSegment = $date !== '' ? $date : self::FALLBACK;
+        $orderSegment = $order !== '' ? $order : self::FALLBACK;
+
+        $segments = [self::FRACHTBRIEF_PREFIX, $companySegment, $dateSegment, $orderSegment];
+
+        if ($company === '' || $date === '' || $order === '') {
+            $segments[] = self::resolveTimestamp($timestamp);
         }
 
         return implode('_', $segments) . '.' . $ext;
