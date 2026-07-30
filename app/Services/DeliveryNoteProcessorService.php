@@ -42,6 +42,17 @@ class DeliveryNoteProcessorService
     public const DOCUMENT_TYPE_FRACHTBRIEF = 'frachtbrief';
 
     /**
+     * Customer-specific subfolders below the configured Frachtbrief base folder.
+     * A confirmed Frachtbrief that is actually filed into the Frachtbrief
+     * destination (i.e. it has an order number) is placed into one of these
+     * based on its recipient company name. This routing is deterministic and
+     * happens purely in PHP — the OpenAI prompt is not involved.
+     */
+    public const FRACHTBRIEF_SUBFOLDER_RHENUS = 'Rhenus';
+    public const FRACHTBRIEF_SUBFOLDER_UPS = 'UPS';
+    public const FRACHTBRIEF_SUBFOLDER_SONSTIGE = 'Sonstige';
+
+    /**
      * Cheap, deterministic pre-check used as CORROBORATION only — never on its
      * own as the classification verdict. Matches an `Order Nummer`-ish label
      * (including the common OCR corruptions `0rder`, `Numner`, `Nr.`, and a
@@ -476,7 +487,13 @@ class DeliveryNoteProcessorService
         $orderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
         $pickupDate = $this->resolveFrachtbriefPickupDate($messageContent);
 
-        $destination = $this->resolveFrachtbriefDestination($process, $resolvedCompanyName, $pickupDate, $orderNumber);
+        $destination = $this->resolveFrachtbriefDestination(
+            $process,
+            $resolvedCompanyName,
+            $pickupDate,
+            $orderNumber,
+            $messageContent->recipient_company ?? null
+        );
 
         $process->document_type = self::DOCUMENT_TYPE_FRACHTBRIEF;
         // The RAW agent name is persisted (not the canonical slug), matching how
@@ -508,7 +525,9 @@ class DeliveryNoteProcessorService
 
             $this->copyToFixedPath(
                 $process->source_file_path,
-                $destination['is_unknown'] ? self::FIXED_UNKNOWN_PATH : self::FIXED_FRACHTBRIEFE_PATH,
+                $destination['is_unknown']
+                    ? self::FIXED_UNKNOWN_PATH
+                    : self::FIXED_FRACHTBRIEFE_PATH . '/' . $destination['subfolder'],
                 $destination['filename']
             );
         } catch (Exception $e) {
@@ -525,17 +544,32 @@ class DeliveryNoteProcessorService
     }
 
     /**
-     * Pure routing decision for a Frachtbrief: folder, filename and the unknown
-     * flag. Extracted so it can be tested without OCR, the agent or the disk —
-     * the same seam resolveDeliveryDestination() provides for delivery notes.
+     * Pure routing decision for a Frachtbrief: folder, filename, subfolder and
+     * the unknown flag. Extracted so it can be tested without OCR, the agent or
+     * the disk — the same seam resolveDeliveryDestination() provides for
+     * delivery notes.
      *
-     * @return array{folder: string, filename: string, is_unknown: bool}
+     * When the file is actually filed into the Frachtbrief destination (order
+     * number present), it is routed into a customer-specific subfolder
+     * (Rhenus / UPS / Sonstige) below the configured base folder, decided from
+     * the best available recipient company name. A Frachtbrief WITHOUT an order
+     * number still goes to the existing unknown folder — the subfolder routing
+     * deliberately does not apply there.
+     *
+     * The company value used for routing prefers the resolved canonical slug
+     * (`$resolvedCompanyName`) and falls back to the raw extracted recipient
+     * name (`$rawRecipientCompany`) when no canonical match exists, so a
+     * recognizable carrier still routes correctly even when it is absent from
+     * the company table and the filename shows the `xxxxxx` placeholder.
+     *
+     * @return array{folder: string, filename: string, is_unknown: bool, subfolder: string}
      */
     public function resolveFrachtbriefDestination(
         Process $process,
         ?string $resolvedCompanyName,
         ?string $pickupDate,
-        ?string $orderNumber
+        ?string $orderNumber,
+        ?string $rawRecipientCompany = null
     ): array
     {
         $orderNumber = FilenameNormalizer::sanitizeOrderNumber($orderNumber);
@@ -544,10 +578,12 @@ class DeliveryNoteProcessorService
         // the file needs a human, so it goes to the existing unknown folder.
         $isUnknown = $orderNumber === '';
 
+        $subfolder = $this->resolveFrachtbriefSubfolder($resolvedCompanyName ?? $rawRecipientCompany);
+
         return [
             'folder' => $isUnknown
                 ? config('delivery_note_processor.unknown_folder')
-                : config('delivery_note_processor.frachtbrief_folder'),
+                : config('delivery_note_processor.frachtbrief_folder') . '/' . $subfolder,
             'filename' => FileRenamingService::generateFrachtbrief(
                 $resolvedCompanyName,
                 $pickupDate,
@@ -556,7 +592,38 @@ class DeliveryNoteProcessorService
                 Carbon::now()->format('YmdHis'),
             ),
             'is_unknown' => $isUnknown,
+            'subfolder' => $subfolder,
         ];
+    }
+
+    /**
+     * Deterministically resolve the customer-specific Frachtbrief subfolder from
+     * a recipient company name. Matching is case-insensitive and substring-based:
+     *
+     *   - contains "Rhenus" → Rhenus
+     *   - contains "UPS"    → UPS
+     *   - anything else, a missing/empty name, or the `xxxxxx` placeholder
+     *                       → Sonstige
+     *
+     * This is intentionally small and isolated so it can be unit-tested in
+     * isolation. It must never call OpenAI — the routing decision is made
+     * exclusively in PHP.
+     */
+    public function resolveFrachtbriefSubfolder(?string $companyName): string
+    {
+        if ($companyName === null) {
+            return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
+        }
+
+        if (Str::contains($companyName, 'rhenus', ignoreCase: true)) {
+            return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
+        }
+
+        if (Str::contains($companyName, 'ups', ignoreCase: true)) {
+            return self::FRACHTBRIEF_SUBFOLDER_UPS;
+        }
+
+        return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
     }
 
     /**
