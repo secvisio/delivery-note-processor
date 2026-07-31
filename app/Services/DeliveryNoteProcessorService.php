@@ -71,6 +71,15 @@ class DeliveryNoteProcessorService
         '/\bweb\s*[-]?\s*[o0]rder\s*[-]?\s*(?:nr|nummer|no)?\.?\s*:?\s*W[O0]{2}\d{8,20}\b/iu';
 
     /**
+     * The same labelled pattern, capturing the value. Used to read the WebOrder
+     * number straight out of the OCR text: the label makes the value
+     * unambiguous, so this is more trustworthy than a model transcription,
+     * which has been observed to drop a character (`WOO…` → `WO…`).
+     */
+    private const FRACHTBRIEF_WEBORDER_CAPTURE_PATTERN =
+        '/\bweb\s*[-]?\s*[o0]rder\s*[-]?\s*(?:nr|nummer|no)?\.?\s*:?\s*(W[O0]{2}\d{8,20})\b/iu';
+
+    /**
      * A `WOO`-prefixed value WITHOUT its label. Far weaker evidence than the
      * pattern above — a bare token could be a tracking reference quoted on an
      * ordinary Lieferschein — so it is never accepted on its own; see
@@ -543,7 +552,7 @@ class DeliveryNoteProcessorService
             $ocrContent
         );
 
-        $orderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
+        $orderNumber = $this->resolveFrachtbriefOrderNumber($messageContent, $ocrContent);
         $pickupDate = $this->resolveFrachtbriefPickupDate($messageContent);
 
         $destination = $this->resolveFrachtbriefDestination(
@@ -744,6 +753,47 @@ class DeliveryNoteProcessorService
     }
 
     /**
+     * Decide the order-number filename segment, reconciling the agent's value
+     * with a labelled WebOrder number read directly from the OCR text.
+     *
+     * The agent transcribes; OCR with an unambiguous label does not. A model
+     * has been observed returning `WO…` for a `WOO…` value, and because the
+     * normalizer tolerates `O`/`0` confusion in the prefix, such a value does
+     * NOT fail loudly — it silently normalizes to a different number, one digit
+     * short of the real one, and that wrong identifier would end up in the
+     * filename and in the database.
+     *
+     * The OCR value therefore wins, but only in the two cases where it is
+     * unambiguously better:
+     *   - the agent produced nothing usable, or
+     *   - the agent produced a WebOrder-shaped value, i.e. both are describing
+     *     the same field and the labelled OCR spelling is authoritative
+     *
+     * A numeric `YYMMDD-NN` value from the agent always keeps priority: that is
+     * the primary identifier, and a WebOrder number is only ever the fallback.
+     */
+    private function resolveFrachtbriefOrderNumber(object $messageContent, string $ocrContent): string
+    {
+        $agentOrderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
+        $ocrOrderNumber = $this->extractWebOrderNumberFromOcr($ocrContent);
+
+        if ($ocrOrderNumber === null || $ocrOrderNumber === $agentOrderNumber) {
+            return $agentOrderNumber;
+        }
+
+        if ($agentOrderNumber === '' || $this->isWebOrderNumber($agentOrderNumber)) {
+            Log::info('Frachtbrief order number taken from the labelled OCR field', [
+                'agent_order_number' => $agentOrderNumber !== '' ? $agentOrderNumber : null,
+                'ocr_weborder_number' => $ocrOrderNumber,
+            ]);
+
+            return $ocrOrderNumber;
+        }
+
+        return $agentOrderNumber;
+    }
+
+    /**
      * Decide the pickup-date filename segment.
      *
      * The ONLY accepted source is an Abholdatum the agent explicitly found in
@@ -832,15 +882,67 @@ class DeliveryNoteProcessorService
             return false;
         }
 
+        if ($this->agentConfirmsFrachtbrief($messageContent)
+            && $this->hasOrderNumberEvidence($messageContent, $ocrContent)) {
+            return true;
+        }
+
+        // Deterministic rescue. The agent decides alone otherwise, and it is a
+        // single non-deterministic call (no temperature, no seed, no schema
+        // enforcement): one wobble in `is_frachtbrief` or `document_confidence`
+        // silently demotes a Frachtbrief into the delivery-note flow, which is
+        // exactly what happened to a real Rhenus waybill in production. A
+        // LABELLED WebOrder number together with an explicit `Rhenus` or
+        // `Frachtbrief` mention is specific enough to hold the classification
+        // on its own.
+        //
+        // The trade is deliberate and narrow: a Lieferschein that both quotes a
+        // labelled WebOrder field AND names Rhenus/Frachtbrief is now filed as a
+        // Frachtbrief even when the agent says otherwise. A bare `WOO…` token
+        // still cannot do this — the label is mandatory here.
+        if ($this->hasLabelledWebOrderEvidence($ocrContent)
+            && preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1) {
+            Log::info('Frachtbrief confirmed from deterministic WebOrder evidence', [
+                'is_frachtbrief' => $messageContent->is_frachtbrief ?? null,
+                'document_confidence' => $messageContent->document_confidence ?? null,
+                'threshold' => $this->getThreshold(),
+                'ocr_weborder_number' => $this->extractWebOrderNumberFromOcr($ocrContent),
+            ]);
+
+            return true;
+        }
+
+        $this->logFrachtbriefRejection($messageContent, $ocrContent);
+
+        return false;
+    }
+
+    /**
+     * The model's own verdict: a real boolean true AND a self-reported
+     * certainty at/above the project threshold. Unchanged in substance — only
+     * lifted out of isConfirmedFrachtbrief() so the deterministic rescue can be
+     * expressed as a separate, clearly bounded branch.
+     */
+    private function agentConfirmsFrachtbrief(object $messageContent): bool
+    {
         if (($messageContent->is_frachtbrief ?? null) !== true) {
             return false;
         }
 
         $confidence = $messageContent->document_confidence ?? null;
-        if ($confidence === null || $confidence < $this->getThreshold()) {
-            return false;
-        }
 
+        return $confidence !== null && $confidence >= $this->getThreshold();
+    }
+
+    /**
+     * Corroborating evidence for the order number, in descending specificity:
+     * an extracted value that normalizes, the original `Order Nummer` label,
+     * a labelled `WebOrdernr.`, and finally a bare WebOrder value that counts
+     * only alongside `Rhenus`/`Frachtbrief`. Extracted verbatim from the
+     * previous inline implementation.
+     */
+    private function hasOrderNumberEvidence(object $messageContent, string $ocrContent): bool
+    {
         if (FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null) !== '') {
             return true;
         }
@@ -849,12 +951,66 @@ class DeliveryNoteProcessorService
             return true;
         }
 
-        if (preg_match(self::FRACHTBRIEF_WEBORDER_PATTERN, $ocrContent) === 1) {
+        if ($this->hasLabelledWebOrderEvidence($ocrContent)) {
             return true;
         }
 
         return preg_match(self::FRACHTBRIEF_WEBORDER_BARE_PATTERN, $ocrContent) === 1
             && preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1;
+    }
+
+    private function hasLabelledWebOrderEvidence(string $ocrContent): bool
+    {
+        return preg_match(self::FRACHTBRIEF_WEBORDER_PATTERN, $ocrContent) === 1;
+    }
+
+    /**
+     * Read a LABELLED WebOrder number straight out of the OCR text and return
+     * it in canonical form, or null when the text carries no such field.
+     *
+     * The label is what makes this safe: an unlabelled `WOO…` token is ignored
+     * here, so an order or invoice reference quoted on some other document can
+     * never be mistaken for a Frachtbrief identifier. The captured value goes
+     * through the shared normalizer, so `W00…`/`WO0…` OCR confusion collapses
+     * onto the same canonical `WOO…` value as everywhere else.
+     */
+    public function extractWebOrderNumberFromOcr(string $ocrContent): ?string
+    {
+        if (preg_match(self::FRACHTBRIEF_WEBORDER_CAPTURE_PATTERN, $ocrContent, $matches) !== 1) {
+            return null;
+        }
+
+        $normalized = FilenameNormalizer::sanitizeOrderNumber($matches[1]);
+
+        return $normalized !== '' ? $normalized : null;
+    }
+
+    /**
+     * Diagnostic trail for a rejected Frachtbrief, so the next occurrence can
+     * be diagnosed from the log instead of by reasoning backwards from the
+     * final filename. Deliberately `debug`: every delivery note and production
+     * order passes through here, so this must not become routine log noise.
+     *
+     * The OCR text itself is NOT logged — it is customer data. Only the
+     * outcome of each condition and the extracted identifier are recorded.
+     */
+    private function logFrachtbriefRejection(object $messageContent, string $ocrContent): void
+    {
+        Log::debug('Frachtbrief not confirmed, falling through to the existing flow', [
+            'is_frachtbrief' => $messageContent->is_frachtbrief ?? null,
+            'document_confidence' => $messageContent->document_confidence ?? null,
+            'threshold' => $this->getThreshold(),
+            'normalized_agent_order_number' =>
+                FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null),
+            'ocr_weborder_number' => $this->extractWebOrderNumberFromOcr($ocrContent),
+            'numeric_order_pattern_matched' =>
+                preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1,
+            'labelled_weborder_pattern_matched' => $this->hasLabelledWebOrderEvidence($ocrContent),
+            'bare_weborder_pattern_matched' =>
+                preg_match(self::FRACHTBRIEF_WEBORDER_BARE_PATTERN, $ocrContent) === 1,
+            'corroboration_matched' =>
+                preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1,
+        ]);
     }
 
     /**
