@@ -15,6 +15,14 @@ final class FilenameNormalizer
 {
     public const FALLBACK_TOKEN = 'xxxxxx';
 
+    /**
+     * Canonical prefix of a Rhenus WebOrder number. Every value returned by
+     * sanitizeOrderNumber() that starts with this prefix IS a WebOrder number —
+     * the method only ever emits `YYMMDD-NN` or this shape — which is what makes
+     * a prefix check a safe carrier signal without a second validation regex.
+     */
+    public const WEBORDER_PREFIX = 'WOO';
+
     private const MAX_SEGMENT_LENGTH = 80;
 
     private const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png', 'tif', 'tiff'];
@@ -110,7 +118,7 @@ final class FilenameNormalizer
         // known so far, and a bare `WOO` followed by a couple of digits must
         // not pass as an identifier.
         if (preg_match('/^W[O0]{2}(\d{8,20})$/i', $value, $matches) === 1) {
-            return 'WOO' . $matches[1];
+            return self::WEBORDER_PREFIX . $matches[1];
         }
 
         return '';

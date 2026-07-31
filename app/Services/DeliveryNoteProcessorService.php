@@ -88,6 +88,15 @@ class DeliveryNoteProcessorService
     private const FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN = '/\b(?:rhenus|frachtbrief)\b/iu';
 
     /**
+     * CARRIER evidence, used exclusively for subfolder routing — not for
+     * classification. Deliberately narrower than the corroboration pattern
+     * above: "Frachtbrief" identifies the document TYPE and says nothing about
+     * who carries it, so it must never select the Rhenus subfolder. Only the
+     * carrier's own name does.
+     */
+    private const FRACHTBRIEF_RHENUS_CARRIER_PATTERN = '/\brhenus\b/iu';
+
+    /**
      * @var string|null
      */
      protected ?string $sourcePath = null;
@@ -542,7 +551,8 @@ class DeliveryNoteProcessorService
             $resolvedCompanyName,
             $pickupDate,
             $orderNumber,
-            $messageContent->recipient_company ?? null
+            $messageContent->recipient_company ?? null,
+            $ocrContent
         );
 
         $process->document_type = self::DOCUMENT_TYPE_FRACHTBRIEF;
@@ -600,17 +610,23 @@ class DeliveryNoteProcessorService
      * delivery notes.
      *
      * When the file is actually filed into the Frachtbrief destination (order
-     * number present), it is routed into a customer-specific subfolder
-     * (Rhenus / Sonstige) below the configured base folder, decided from
-     * the best available recipient company name. A Frachtbrief WITHOUT an order
-     * number still goes to the existing unknown folder — the subfolder routing
-     * deliberately does not apply there.
+     * number present), it is routed into a CARRIER-specific subfolder
+     * (Rhenus / Sonstige) below the configured base folder. A Frachtbrief
+     * WITHOUT an order number still goes to the existing unknown folder — the
+     * subfolder routing deliberately does not apply there.
      *
-     * The company value used for routing prefers the resolved canonical slug
-     * (`$resolvedCompanyName`) and falls back to the raw extracted recipient
-     * name (`$rawRecipientCompany`) when no canonical match exists, so a
-     * recognizable carrier still routes correctly even when it is absent from
-     * the company table and the filename shows the `xxxxxx` placeholder.
+     * The subfolder and the filename answer two DIFFERENT questions and are
+     * fed from different values: the filename names the RECIPIENT company,
+     * while the subfolder names the CARRIER. On a real Rhenus waybill the
+     * recipient is the customer (e.g. "Orthomol Pharmazeutische Vertricos
+     * GmbH"), so deriving the carrier from the recipient filed those documents
+     * under Sonstige. See resolveFrachtbriefSubfolder() for the carrier rules.
+     *
+     * The company value used as the LAST carrier fallback prefers the resolved
+     * canonical slug (`$resolvedCompanyName`) and falls back to the raw
+     * extracted recipient name (`$rawRecipientCompany`), so a recipient that
+     * happens to be the carrier still routes correctly even when it is absent
+     * from the company table and the filename shows the `xxxxxx` placeholder.
      *
      * @return array{folder: string, filename: string, is_unknown: bool, subfolder: string}
      */
@@ -619,7 +635,8 @@ class DeliveryNoteProcessorService
         ?string $resolvedCompanyName,
         ?string $pickupDate,
         ?string $orderNumber,
-        ?string $rawRecipientCompany = null
+        ?string $rawRecipientCompany = null,
+        ?string $ocrContent = null
     ): array
     {
         $orderNumber = FilenameNormalizer::sanitizeOrderNumber($orderNumber);
@@ -628,7 +645,11 @@ class DeliveryNoteProcessorService
         // the file needs a human, so it goes to the existing unknown folder.
         $isUnknown = $orderNumber === '';
 
-        $subfolder = $this->resolveFrachtbriefSubfolder($resolvedCompanyName ?? $rawRecipientCompany);
+        $subfolder = $this->resolveFrachtbriefSubfolder(
+            $resolvedCompanyName ?? $rawRecipientCompany,
+            $orderNumber,
+            $ocrContent
+        );
 
         return [
             'folder' => $isUnknown
@@ -647,33 +668,79 @@ class DeliveryNoteProcessorService
     }
 
     /**
-     * Deterministically resolve the customer-specific Frachtbrief subfolder from
-     * a recipient company name. Matching is case-insensitive and substring-based:
+     * Deterministically resolve the CARRIER-specific Frachtbrief subfolder.
      *
-     *   - contains "Rhenus" → Rhenus
-     *   - anything else, a missing/empty name, or the `xxxxxx` placeholder
-     *                       → Sonstige
+     * The carrier is not the recipient. A Rhenus waybill names the customer as
+     * the Empfänger, so the recipient company alone — which is all this method
+     * used to receive — cannot identify the carrier, and real Rhenus documents
+     * were filed under Sonstige because of it. Three signals are consulted, in
+     * descending order of directness:
      *
-     * There used to be a dedicated UPS subfolder. It was removed because the
-     * separate filing is no longer wanted: UPS documents are ordinary
-     * Frachtbriefe and now land in Sonstige. Only their destination changed —
-     * detection, the company slug and the filename are all unaffected.
+     *   1. the raw OCR text names "Rhenus"        → Rhenus
+     *   2. the order number is a WebOrder number  → Rhenus
+     *      (`WOO` + digits is Rhenus' own numbering scheme, so the identifier
+     *       itself names the carrier)
+     *   3. the recipient company contains "Rhenus" → Rhenus
+     *      (unchanged legacy rule: covers documents where Rhenus IS the
+     *       recipient, and older scans that carry neither of the above)
+     *   4. anything else, a missing/empty name, or the `xxxxxx` placeholder
+     *                                              → Sonstige
+     *
+     * The word "Frachtbrief" is deliberately NOT carrier evidence: it names the
+     * document type, not who carries it. That is why this method uses the
+     * narrow FRACHTBRIEF_RHENUS_CARRIER_PATTERN and not the broader
+     * corroboration pattern used during classification.
+     *
+     * Routing is independent of classification: a document reaches this method
+     * only after isConfirmedFrachtbrief() already agreed, and nothing here can
+     * make or unmake that decision. A Frachtbrief without a usable order number
+     * never gets here in a meaningful way — the caller sends it to the unknown
+     * folder regardless of the subfolder computed.
+     *
+     * The two trailing parameters are optional so the historical
+     * "route by recipient company" call remains valid.
      *
      * This is intentionally small and isolated so it can be unit-tested in
      * isolation. It must never call OpenAI — the routing decision is made
      * exclusively in PHP.
      */
-    public function resolveFrachtbriefSubfolder(?string $companyName): string
+    public function resolveFrachtbriefSubfolder(
+        ?string $companyName,
+        ?string $orderNumber = null,
+        ?string $ocrContent = null
+    ): string
     {
-        if ($companyName === null) {
-            return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
+        if ($ocrContent !== null && preg_match(self::FRACHTBRIEF_RHENUS_CARRIER_PATTERN, $ocrContent) === 1) {
+            return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
         }
 
-        if (Str::contains($companyName, 'rhenus', ignoreCase: true)) {
+        if ($this->isWebOrderNumber($orderNumber)) {
+            return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
+        }
+
+        if ($companyName !== null && Str::contains($companyName, 'rhenus', ignoreCase: true)) {
             return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
         }
 
         return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
+    }
+
+    /**
+     * Whether an order number is a Rhenus WebOrder number.
+     *
+     * The value is put through the shared normalizer rather than matched
+     * against a second WebOrder regex, so there is exactly one definition of
+     * what a valid WebOrder number is. sanitizeOrderNumber() emits only two
+     * shapes — `YYMMDD-NN` and the canonical `WOO` + digits — which makes the
+     * prefix check unambiguous, and it is idempotent, so an already-normalized
+     * value is safe to pass in.
+     */
+    private function isWebOrderNumber(?string $orderNumber): bool
+    {
+        return str_starts_with(
+            FilenameNormalizer::sanitizeOrderNumber($orderNumber),
+            FilenameNormalizer::WEBORDER_PREFIX
+        );
     }
 
     /**

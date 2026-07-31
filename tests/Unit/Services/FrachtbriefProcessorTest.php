@@ -484,8 +484,11 @@ it('keeps the weborder number when the recipient company is missing', function (
 
     $result = $processor->run(storedProcess());
 
+    // The WebOrder number identifies Rhenus as the CARRIER, so the file is
+    // filed under Rhenus even though no recipient company could be extracted
+    // and the filename segment falls back to the placeholder.
     $expected = config('delivery_note_processor.frachtbrief_folder')
-        . '/Sonstige/FB_xxxxxx_xxxxxx_WOO0000006176714_20260724143025.pdf';
+        . '/Rhenus/FB_xxxxxx_xxxxxx_WOO0000006176714_20260724143025.pdf';
 
     expect($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
         ->and($result->frachtbrief_order_number)->toBe('WOO0000006176714')
@@ -831,6 +834,73 @@ it('routes UPS recipient companies to the Sonstige subfolder', function (string 
     'ups-deutschland',                  // resolved slug shape
 ]);
 
+/*
+| Carrier routing. The subfolder names the CARRIER, the filename names the
+| RECIPIENT — on a real Rhenus waybill those are two different companies, which
+| is why the recipient alone cannot decide the subfolder.
+*/
+
+it('routes a document whose ocr names Rhenus to the Rhenus subfolder', function (string $ocr) {
+    $service = new DeliveryNoteProcessorService();
+
+    // Recipient is the customer, not the carrier, and the order number is the
+    // ordinary numeric one — the OCR mention is the only carrier evidence.
+    expect($service->resolveFrachtbriefSubfolder('orthomol-pharmazeutische-vertricos-gmbh', '260630-01', $ocr))
+        ->toBe('Rhenus');
+})->with([
+    "Rhenus Logistics\nOrder Nummer: 260630-01\n",
+    "RHENUS SE & Co. KG\n",
+    "Frachtfuehrer: rhenus warehousing\n",
+    "Absender: Rhenus-Logistik GmbH\n",
+]);
+
+it('routes a weborder number to the Rhenus subfolder regardless of the recipient', function (?string $company) {
+    $service = new DeliveryNoteProcessorService();
+
+    // No OCR at all: the WOO numbering scheme is Rhenus' own, so the
+    // identifier itself is the carrier signal.
+    expect($service->resolveFrachtbriefSubfolder($company, 'WOO0000006179814'))->toBe('Rhenus');
+})->with([
+    'orthomol-pharmazeutische-vertricos-gmbh',
+    'Musterfirma GmbH',
+    'xxxxxx',
+    null,
+]);
+
+it('accepts a not-yet-normalized weborder number as carrier evidence', function (string $orderNumber) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder('Musterfirma GmbH', $orderNumber))->toBe('Rhenus');
+})->with([
+    'woo0000006179814',                 // lowercase, as the agent may return it
+    'W000000006179814',                 // OCR read the prefix O's as zeros
+]);
+
+it('does not treat the word Frachtbrief as carrier evidence', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    // "Frachtbrief" names the document type, not who carries it.
+    expect($service->resolveFrachtbriefSubfolder('Musterfirma GmbH', '260630-01', "Frachtbrief\nOrder Nummer: 260630-01\n"))
+        ->toBe('Sonstige');
+});
+
+it('does not treat a rejected weborder-ish value as carrier evidence', function (string $orderNumber) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder('Musterfirma GmbH', $orderNumber))->toBe('Sonstige');
+})->with([
+    'WOO123',                           // too few digits — not a valid WebOrder number
+    'WOOABCDEF',
+    '260630-01',
+]);
+
+it('does not treat a Rhenus-like substring in unrelated text as carrier evidence', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->resolveFrachtbriefSubfolder('Musterfirma GmbH', '260630-01', "Rhenusstrasse 4\n"))
+        ->toBe('Sonstige');
+});
+
 it('routes everything else to the Sonstige subfolder', function (?string $company) {
     $service = new DeliveryNoteProcessorService();
 
@@ -917,6 +987,76 @@ it('keeps a Frachtbrief without an order number in the unknown folder, not Sonst
         ->and($destination['folder'])->not->toContain('Sonstige');
 });
 
+it('keeps a Frachtbrief without an order number in the unknown folder even with rhenus carrier evidence', function () {
+    // Carrier evidence must not override the unknown-folder rule: without its
+    // primary identifier the document still needs a human.
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination(
+        $process,
+        'orthomol-pharmazeutische-vertricos-gmbh',
+        '2026-07-23',
+        null,
+        'Orthomol Pharmazeutische Vertricos GmbH',
+        "Rhenus Logistics\nWebOrdernr. unleserlich\n"
+    );
+
+    expect($destination['is_unknown'])->toBeTrue()
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.unknown_folder'))
+        ->and($destination['folder'])->not->toContain('Rhenus')
+        ->and($destination['folder'])->not->toContain('Sonstige');
+});
+
+it('routes the real rhenus weborder document to the Rhenus subfolder', function () {
+    // Regression guard for the production defect: the recipient is the
+    // customer, so the file was filed under Sonstige. The filename must stay
+    // recipient-based and byte-identical; only the subfolder changes.
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination(
+        $process,
+        'orthomol-pharmazeutische-vertricos-gmbh',
+        '2026-07-23',
+        'WOO0000006179814',
+        'Orthomol Pharmazeutische Vertricos GmbH',
+        "Rhenus Logistics\nWebOrdernr. WOO0000006179814\nEmpfaenger: Orthomol Pharmazeutische Vertricos GmbH\n"
+    );
+
+    expect($destination['is_unknown'])->toBeFalse()
+        ->and($destination['subfolder'])->toBe('Rhenus')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Rhenus')
+        ->and($destination['filename'])
+        ->toBe('FB_orthomol-pharmazeutische-vertricos-gmbh_2026-07-23_WOO0000006179814.pdf');
+});
+
+it('routes a weborder document to Rhenus even when the ocr never says rhenus', function () {
+    // Degraded OCR: the carrier name was not readable, but the WebOrder
+    // numbering scheme still identifies Rhenus. This is the key regression.
+    $service = new DeliveryNoteProcessorService();
+
+    $process = new Process();
+    $process->forceFill(['source_file_path' => 'source/scan.pdf']);
+
+    $destination = $service->resolveFrachtbriefDestination(
+        $process,
+        'orthomol-pharmazeutische-vertricos-gmbh',
+        '2026-07-23',
+        'WOO0000006179814',
+        'Orthomol Pharmazeutische Vertricos GmbH',
+        "WebOrdernr. WOO0000006179814\nEmpfaenger: Orthomol Pharmazeutische Vertricos GmbH\n"
+    );
+
+    expect($destination['subfolder'])->toBe('Rhenus')
+        ->and($destination['filename'])
+        ->toBe('FB_orthomol-pharmazeutische-vertricos-gmbh_2026-07-23_WOO0000006179814.pdf');
+});
+
 /*
 | Full-pipeline destination checks for the two carriers, mirroring the existing
 | "writes a complete frachtbrief into the configured frachtbrief folder" test.
@@ -939,6 +1079,70 @@ it('writes a Rhenus frachtbrief into the Rhenus subfolder with an unchanged file
         ->and(dirname($result->target_file_path))->toBe($folder)
         ->and(basename($result->target_file_path))->toBe('FB_rhenus-logistics-gmbh_2026-06-30_260630-01.pdf')
         ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($result->target_file_path))->toBeTrue();
+});
+
+it('writes the real rhenus weborder frachtbrief into the Rhenus subfolder end to end', function () {
+    // The document from production, reproduced through the whole pipeline.
+    $ocr = <<<'TXT'
+        Rhenus Logistics
+        WebOrdernr. WOO0000006179814
+        Empfaenger: Orthomol Pharmazeutische Vertricos GmbH
+        Abholdatum: 23.07.2026
+        TXT;
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'order_number' => ['value' => 'WOO0000006179814', 'confidence' => 0.97],
+            'pickup_date' => ['value' => '23.07.2026', 'confidence' => 0.93],
+            'recipient_company' => ['value' => 'Orthomol Pharmazeutische Vertricos GmbH', 'confidence' => 0.95],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    $expected = config('delivery_note_processor.frachtbrief_folder')
+        . '/Rhenus/FB_orthomol-pharmazeutische-vertricos-gmbh_2026-07-23_WOO0000006179814.pdf';
+
+    expect($processor->agentCalls)->toBe([FrachtbriefAgent::class])
+        ->and($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and($result->frachtbrief_order_number)->toBe('WOO0000006179814')
+        // The RECIPIENT is persisted and slugged into the filename; the carrier
+        // only decides the folder and never appears in the name.
+        ->and($result->frachtbrief_recipient_company)->toBe('Orthomol Pharmazeutische Vertricos GmbH')
+        ->and($result->target_file_path)->toBe($expected)
+        ->and(basename($result->target_file_path))->not->toContain('rhenus')
+        ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($expected))->toBeTrue();
+});
+
+it('leaves a delivery note that mentions rhenus in the delivery-note flow', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr(DELIVERY_NOTE_OCR . "\nVersand durch Rhenus Logistics\n")
+        ->withResponse(FrachtbriefAgent::class, agentMessage(notAFrachtbriefJson()))
+        ->withResponse(ProductionOrderAgent::class, agentMessage(productionOrderJson(false)))
+        ->withResponse(DeliveryNoteAgent::class, agentMessage(deliveryNoteJson()));
+
+    $result = $processor->run(storedProcess());
+
+    expect($processor->agentCalls)
+        ->toBe([FrachtbriefAgent::class, ProductionOrderAgent::class, DeliveryNoteAgent::class])
+        ->and($result->document_type)->toBeNull()
+        ->and(basename($result->target_file_path))->toBe('ls_dn99_acme-logistics.pdf')
+        ->and($result->target_file_path)->not->toContain('Frachtbriefe');
+});
+
+it('leaves a production order that mentions rhenus in the production-order flow', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr("Produktionsauftrag\nAuftrag: 123456\nProduktion: 98765\nVersand: Rhenus\n")
+        ->withResponse(FrachtbriefAgent::class, agentMessage(notAFrachtbriefJson()))
+        ->withResponse(ProductionOrderAgent::class, agentMessage(productionOrderJson(true)));
+
+    $result = $processor->run(storedProcess());
+
+    expect($processor->agentCalls)->toBe([FrachtbriefAgent::class, ProductionOrderAgent::class])
+        ->and($result->document_type)->toBeNull()
+        ->and($result->target_file_path)
+        ->toBe(config('delivery_note_processor.production_order_folder') . '/PA_123456_98765.pdf')
+        ->and($result->target_file_path)->not->toContain('Frachtbriefe');
 });
 
 it('writes a UPS frachtbrief into the Sonstige subfolder with an unchanged filename', function () {
