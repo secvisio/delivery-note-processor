@@ -53,24 +53,36 @@ final class FilenameNormalizer
     }
 
     /**
-     * Normalize a Frachtbrief "Order Nummer" (expected shape `YYMMDD-NN`).
+     * Normalize a Frachtbrief order number. TWO shapes are accepted:
+     *
+     *  1. `YYMMDD-NN`   — the primary "Order Nummer" (e.g. `260630-01`)
+     *  2. `WOO` + digits — the Rhenus "WebOrdernr." (e.g. `WOO0000006176714`)
      *
      * Deliberately NOT routed through sanitizeIdentifier(): that method strips
      * every non-alphanumeric character, which would destroy the structural
-     * hyphen that makes the value recognizable (`260630-01` → `26063001`).
+     * hyphen that makes the first shape recognizable (`260630-01` → `26063001`).
      *
      * Tolerated OCR noise:
      *  - surrounding/inner whitespace ("260630 - 01", "260630- 01", "260630 -01")
      *  - unicode dashes (en/em dash, minus sign) in place of the ASCII hyphen
      *  - a completely dropped hyphen ("26063001"), which is re-inserted
+     *  - `O`/`0` confusion in the WebOrder prefix ("W000000006176714"), which is
+     *    canonicalized back to the uppercase `WOO` prefix
      *
-     * Anything that does not end up matching `\d{6}-\d{2}` exactly returns the
-     * empty string, which the caller renders as the `xxxxxx` placeholder.
+     * Anything that does not end up matching `\d{6}-\d{2}` or `WOO\d{8,20}`
+     * exactly returns the empty string, which the caller renders as the
+     * `xxxxxx` placeholder.
      *
-     * The six leading digits are deliberately NOT interpreted. They often look
-     * like a YYMMDD date, but that resemblance is coincidental: the value is
-     * part of the order number and nothing else. Do not add date extraction
-     * here — see resolveFrachtbriefPickupDate() in DeliveryNoteProcessorService.
+     * The output is idempotent — the method is applied several times to the
+     * same value during one processing run (evidence check, destination
+     * resolution, filename generation), and all of them must agree.
+     *
+     * The digits are deliberately NOT interpreted, in NEITHER shape. The six
+     * leading digits of `260630-01` often look like a YYMMDD date, and a
+     * WebOrder number is nothing but digits, but no date meaning may be read
+     * out of either: the digits are part of the order number and nothing else.
+     * Do not add date extraction here — see resolveFrachtbriefPickupDate() in
+     * DeliveryNoteProcessorService.
      */
     public static function sanitizeOrderNumber(?string $orderNumber): string
     {
@@ -89,6 +101,16 @@ final class FilenameNormalizer
         // Hyphen lost during OCR: 8 straight digits still carry the structure.
         if (preg_match('/^(\d{6})(\d{2})$/', $value, $matches) === 1) {
             return $matches[1] . '-' . $matches[2];
+        }
+
+        // Rhenus WebOrder number. The prefix is matched tolerantly (`W00`,
+        // `WO0`, lowercase) but always rendered as the canonical `WOO`, so two
+        // scans of the same document produce the same filename. The digit
+        // count is bounded rather than fixed — only one production sample is
+        // known so far, and a bare `WOO` followed by a couple of digits must
+        // not pass as an identifier.
+        if (preg_match('/^W[O0]{2}(\d{8,20})$/i', $value, $matches) === 1) {
+            return 'WOO' . $matches[1];
         }
 
         return '';

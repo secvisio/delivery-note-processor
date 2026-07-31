@@ -308,6 +308,211 @@ it('accepts order-number evidence found only in the raw ocr text', function (str
 
 /*
 |--------------------------------------------------------------------------
+| Rhenus WebOrder detection (`WebOrdernr. WOO...`)
+|--------------------------------------------------------------------------
+|
+| The secondary identifying signal. Everything here goes through the SAME
+| gate as the primary one: the agent must still have answered
+| is_frachtbrief = true with a confidence at/above the threshold — a regex
+| match alone never classifies a document.
+*/
+
+/** Payload with no extracted order number, so the OCR evidence path is exercised. */
+function frachtbriefWithoutOrderNumber(): object
+{
+    return (new DeliveryNoteProcessorService())->normalizeFrachtbriefContent(json_decode(frachtbriefJson([
+        'order_number' => ['value' => null, 'confidence' => null],
+    ])));
+}
+
+it('accepts a labelled weborder number found in the raw ocr text', function (string $line) {
+    $service = new DeliveryNoteProcessorService();
+
+    // Deliberately WITHOUT the words "Rhenus" or "Frachtbrief": a correctly
+    // labelled WebOrder value is sufficient evidence on its own.
+    expect($service->isConfirmedFrachtbrief(frachtbriefWithoutOrderNumber(), "Kopfzeile\n{$line}\nAbholdatum"))
+        ->toBeTrue();
+})->with([
+    'WebOrdernr. WOO0000006176714',
+    'WebOrdernr WOO0000006176714',
+    'WebOrder-Nr. WOO0000006176714',
+    'Web Order Nr. WOO0000006176714',
+    'WebOrdernr.: WOO0000006176714',
+    'Web0rdernr. WOO0000006176714',      // OCR read the O as a zero
+    'WebOrdernr. W000000006176714',      // OCR read the prefix O's as zeros
+    'weborder nr woo0000006176714',      // fully lowercased
+]);
+
+it('accepts a labelled weborder number together with the optional corroborating terms', function (string $ocr) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->isConfirmedFrachtbrief(frachtbriefWithoutOrderNumber(), $ocr))->toBeTrue();
+})->with([
+    "Rhenus Logistics GmbH\nWebOrdernr. WOO0000006176714\n",
+    "Frachtbrief\nWebOrdernr. WOO0000006176714\n",
+    "Rhenus Logistics GmbH\nFrachtbrief\nWebOrdernr. WOO0000006176714\n",
+]);
+
+it('accepts a bare weborder number only when rhenus or frachtbrief corroborates it', function (string $ocr) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->isConfirmedFrachtbrief(frachtbriefWithoutOrderNumber(), $ocr))->toBeTrue();
+})->with([
+    "Rhenus Logistics GmbH\nWOO0000006176714\n",
+    "Frachtbrief\nWOO0000006176714\n",
+]);
+
+it('rejects a bare weborder number without any corroboration', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->isConfirmedFrachtbrief(frachtbriefWithoutOrderNumber(), "Lieferschein\nWOO0000006176714\n"))
+        ->toBeFalse();
+});
+
+it('rejects weborder-shaped noise that is not a real weborder number', function (string $ocr) {
+    $service = new DeliveryNoteProcessorService();
+
+    expect($service->isConfirmedFrachtbrief(frachtbriefWithoutOrderNumber(), $ocr))->toBeFalse();
+})->with([
+    "Rhenus\nWebOrdernr. WOO12\n",            // too few digits, even when labelled
+    "Rhenus\nWebOrdernr. WOOABCDEF\n",        // no digits at all
+    "Rhenus\nWOO12345\n",                     // bare and too short
+    "Frachtbrief\nSchraubenWOO0000006176714", // not a standalone token
+]);
+
+it('accepts a weborder number the agent extracted itself', function () {
+    $service = new DeliveryNoteProcessorService();
+
+    $content = $service->normalizeFrachtbriefContent(json_decode(frachtbriefJson([
+        'order_number' => ['value' => 'WOO0000006176714', 'confidence' => 0.97],
+    ])));
+
+    // No supporting OCR text at all — the extracted value alone is evidence,
+    // exactly as it already is for the numeric format.
+    expect($service->isConfirmedFrachtbrief($content, 'nothing useful here'))->toBeTrue();
+});
+
+it('still requires the agent verdict and the threshold for a weborder document', function (array $overrides) {
+    $service = new DeliveryNoteProcessorService();
+
+    $content = $service->normalizeFrachtbriefContent(json_decode(frachtbriefJson(array_replace([
+        'order_number' => ['value' => null, 'confidence' => null],
+    ], $overrides))));
+
+    expect($service->isConfirmedFrachtbrief($content, "Rhenus\nWebOrdernr. WOO0000006176714\n"))->toBeFalse();
+})->with([
+    'agent says no' => [['is_frachtbrief' => false]],
+    'confidence below threshold' => [['document_confidence' => 0.5]],
+    'confidence missing' => [['document_confidence' => null]],
+]);
+
+it('keeps the numeric order number when a document carries both formats', function () {
+    $ocr = "Order Nummer: 260630-01\nWebOrdernr. WOO0000006176714\nEmpfaenger: Musterfirma GmbH\n";
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson()));
+
+    $result = $processor->run(storedProcess());
+
+    expect($result->frachtbrief_order_number)->toBe('260630-01')
+        ->and(basename($result->target_file_path))->toBe('FB_musterfirma-gmbh_2026-06-30_260630-01.pdf')
+        ->and($result->target_file_path)->not->toContain('WOO0000006176714');
+});
+
+it('does not intercept a delivery note that merely mentions a WOO token', function () {
+    // The agent hallucinates a Frachtbrief, but the only WOO-ish evidence is a
+    // bare token on an ordinary Lieferschein — the PHP gate vetoes it and the
+    // untouched production-order → delivery-note flow runs as before.
+    $processor = (new FakeAgentProcessor())
+        ->withOcr(DELIVERY_NOTE_OCR . "\nUnsere Referenz WOO0000006176714\n")
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'order_number' => ['value' => null, 'confidence' => null],
+        ])))
+        ->withResponse(ProductionOrderAgent::class, agentMessage(productionOrderJson(false)))
+        ->withResponse(DeliveryNoteAgent::class, agentMessage(deliveryNoteJson()));
+
+    $result = $processor->run(storedProcess());
+
+    expect($processor->agentCalls)
+        ->toBe([FrachtbriefAgent::class, ProductionOrderAgent::class, DeliveryNoteAgent::class])
+        ->and($result->document_type)->toBeNull()
+        ->and(basename($result->target_file_path))->toBe('ls_dn99_acme-logistics.pdf');
+});
+
+/*
+| Full-pipeline coverage for the Rhenus WebOrder case, mirroring the existing
+| complete-frachtbrief test.
+*/
+
+it('processes a rhenus weborder frachtbrief end to end', function () {
+    $ocr = "Rhenus Logistics GmbH\nWebOrdernr. WOO0000006176714\nEmpfaenger: Rhenus Logistics GmbH\nAbholdatum: 31.07.2026\n";
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'order_number' => ['value' => 'WOO0000006176714', 'confidence' => 0.97],
+            'pickup_date' => ['value' => '31.07.2026', 'confidence' => 0.9],
+            'recipient_company' => ['value' => 'Rhenus Logistics GmbH', 'confidence' => 0.95],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    $expected = config('delivery_note_processor.frachtbrief_folder')
+        . '/Rhenus/FB_rhenus-logistics-gmbh_2026-07-31_WOO0000006176714.pdf';
+
+    expect($processor->agentCalls)->toBe([FrachtbriefAgent::class])
+        ->and($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and($result->status)->toBe('finished')
+        ->and($result->frachtbrief_order_number)->toBe('WOO0000006176714')
+        ->and((float)$result->frachtbrief_order_number_percent)->toBe(0.97)
+        ->and($result->frachtbrief_pickup_date)->toBe('2026-07-31')
+        ->and($result->target_file_path)->toBe($expected)
+        ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($expected))->toBeTrue();
+});
+
+it('keeps the weborder number when the recipient company is missing', function () {
+    $ocr = "WebOrdernr. WOO0000006176714\nAbholdatum unbekannt\n";
+
+    $processor = (new FakeAgentProcessor())
+        ->withOcr($ocr)
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'order_number' => ['value' => 'WOO0000006176714', 'confidence' => 0.97],
+            'pickup_date' => ['value' => null, 'confidence' => null],
+            'recipient_company' => ['value' => null, 'confidence' => null],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    $expected = config('delivery_note_processor.frachtbrief_folder')
+        . '/Sonstige/FB_xxxxxx_xxxxxx_WOO0000006176714_20260724143025.pdf';
+
+    expect($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and($result->frachtbrief_order_number)->toBe('WOO0000006176714')
+        ->and($result->frachtbrief_recipient_company)->toBeNull()
+        ->and($result->frachtbrief_pickup_date)->toBeNull()
+        ->and($result->target_file_path)->toBe($expected)
+        ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($expected))->toBeTrue();
+});
+
+it('lowercases and canonicalizes a weborder number the agent returned in lowercase', function () {
+    $processor = (new FakeAgentProcessor())
+        ->withOcr("WebOrdernr. WOO0000006176714\n")
+        ->withResponse(FrachtbriefAgent::class, agentMessage(frachtbriefJson([
+            'order_number' => ['value' => 'woo0000006176714', 'confidence' => 0.97],
+            'pickup_date' => ['value' => null, 'confidence' => null],
+            'recipient_company' => ['value' => null, 'confidence' => null],
+        ])));
+
+    $result = $processor->run(storedProcess());
+
+    expect($result->frachtbrief_order_number)->toBe('WOO0000006176714')
+        ->and(basename($result->target_file_path))
+        ->toBe('FB_xxxxxx_xxxxxx_WOO0000006176714_20260724143025.pdf');
+});
+
+/*
+|--------------------------------------------------------------------------
 | 6-10. Extraction
 |--------------------------------------------------------------------------
 */

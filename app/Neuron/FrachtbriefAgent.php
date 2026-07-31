@@ -32,8 +32,11 @@ class FrachtbriefAgent extends Agent
                 'You are a smart AI Agent specialised in identifying freight-waybill documents '
                 . '("Frachtbrief") in text parsed by an OCR scanner. The primary identifying signal '
                 . 'is an "Order Nummer" field whose value looks like YYMMDD-NN (for example '
-                . '"260630-01"). You also extract the Order Nummer, the Abholdatum (pickup date) '
-                . 'and the recipient company (Firma / Empfängername) from the document.',
+                . '"260630-01"). A secondary signal, used only when no such Order Nummer is '
+                . 'present, is a Rhenus "WebOrdernr." field whose value starts with WOO followed '
+                . 'by digits (for example "WOO0000006176714"). You also extract that order number, '
+                . 'the Abholdatum (pickup date) and the recipient company (Firma / Empfängername) '
+                . 'from the document.',
             ],
         );
     }

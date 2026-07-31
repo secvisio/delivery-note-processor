@@ -62,6 +62,33 @@ class DeliveryNoteProcessorService
         '/[o0]rder\s*[-]?\s*(?:nummer|numner|nunmer|nr\.?|no\.?)\s*[:.]?\s*\d{6}\s*[-\x{2010}-\x{2015}\x{2212}]?\s*\d{2}/iu';
 
     /**
+     * Secondary, Rhenus-specific corroboration: a `WebOrdernr.` label followed
+     * by a `WOO`-prefixed value. The label and the value must appear together,
+     * which is what makes this specific enough to stand on its own — the same
+     * way the `Order Nummer` label pattern above does. Spacing, hyphenation,
+     * the trailing dot/colon and `O`/`0` OCR confusion are all tolerated.
+     */
+    private const FRACHTBRIEF_WEBORDER_PATTERN =
+        '/\bweb\s*[-]?\s*[o0]rder\s*[-]?\s*(?:nr|nummer|no)?\.?\s*:?\s*W[O0]{2}\d{8,20}\b/iu';
+
+    /**
+     * A `WOO`-prefixed value WITHOUT its label. Far weaker evidence than the
+     * pattern above — a bare token could be a tracking reference quoted on an
+     * ordinary Lieferschein — so it is never accepted on its own; see
+     * isConfirmedFrachtbrief(), which additionally requires the corroboration
+     * pattern below. The digit floor is deliberately higher than in the
+     * labelled variant for the same reason.
+     */
+    private const FRACHTBRIEF_WEBORDER_BARE_PATTERN = '/\bW[O0]{2}\d{10,20}\b/iu';
+
+    /**
+     * Optional corroborating terms for a Rhenus WebOrder document. These are
+     * NEVER required alongside a correctly labelled WebOrder number — they only
+     * unlock the bare, unlabelled variant above.
+     */
+    private const FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN = '/\b(?:rhenus|frachtbrief)\b/iu';
+
+    /**
      * @var string|null
      */
      protected ?string $sourcePath = null;
@@ -142,8 +169,9 @@ class DeliveryNoteProcessorService
     /**
      * Prompt for the Frachtbrief (freight waybill) classification + extraction
      * agent. Runs FIRST, before the production-order agent, because its
-     * identifying signal — an `Order Nummer` shaped like `YYMMDD-NN` — is far
-     * more specific than the production-order layout heuristics.
+     * identifying signals — an `Order Nummer` shaped like `YYMMDD-NN`, or the
+     * Rhenus `WebOrdernr.` value shaped like `WOO` + digits — are far more
+     * specific than the production-order layout heuristics.
      *
      * The prompt is deliberately strict about NOT treating a generic
      * Bestellnummer/Auftragsnummer as proof: ordinary Lieferscheine routinely
@@ -167,6 +195,20 @@ class DeliveryNoteProcessorService
             OCR; treat all of these as the same field:
               Order Nummer, Ordernummer, Order Nr., Order-Nr., 0rder Nummer, 0rder Numner
 
+            SECONDARY IDENTIFYING SIGNAL — RHENUS WEBORDER
+            Only when NO valid "Order Nummer" in the YYMMDD-NN format above is present,
+            a document may ALSO be a Frachtbrief when it carries a WebOrder field whose
+            value starts with WOO followed by digits, for example:
+              WebOrdernr. WOO0000006176714
+              WebOrdernr WOO0000006176714
+              WebOrder-Nr. WOO0000006176714
+              Web Order Nr. WOO0000006176714
+              WebOrdernr.: WOO0000006176714
+              Web0rdernr. WOO0000006176714
+            A correctly labelled WebOrder value is on its own sufficient evidence for a
+            Frachtbrief. If the document additionally contains "Rhenus" or "Frachtbrief",
+            that is stronger corroborating evidence and document_confidence may reflect it.
+
             SUPPORTING SIGNALS (corroboration, not proof on their own)
               Abholdatum, Empfaenger, Empfänger, Absender, Frachtfuehrer, Frachtführer,
               Ladestelle, Entladestelle, CMR
@@ -176,10 +218,16 @@ class DeliveryNoteProcessorService
             "Order" reference does NOT make a document a Frachtbrief. Ordinary delivery notes
             (Lieferscheine) and invoices frequently contain a customer order reference. Set
             is_frachtbrief to false unless you find an Order Nummer in the YYMMDD-NN shape, or
-            the document is otherwise unmistakably a freight waybill.
+            a labelled WebOrder number as described above, or the document is otherwise
+            unmistakably a freight waybill. A bare "WOO..." token without a WebOrder label is
+            NOT enough on its own.
 
             VALUES TO EXTRACT
-              - order_number      : the Order Nummer, keep the hyphen, e.g. "260630-01"
+              - order_number      : the Order Nummer, keep the hyphen, e.g. "260630-01".
+                                    When — and only when — no Order Nummer in the YYMMDD-NN
+                                    format is present, return the complete WebOrder number
+                                    INCLUDING its WOO prefix instead, e.g. "WOO0000006176714".
+                                    Never invent, derive, shorten or drop the WOO prefix.
               - pickup_date       : the Abholdatum, NORMALIZED to YYYY-MM-DD
                                     ("30.06.2026" and "30/06/2026" both become "2026-06-30")
               - recipient_company : the receiving company (Firma / Empfaengername)
@@ -190,9 +238,11 @@ class DeliveryNoteProcessorService
               Abholdatum, Abhol-Datum, Datum der Abholung, Pickup Date, Collection Date
 
             NEVER produce a pickup_date from any of the following:
-              - the order number. The leading digits of "260630-01" may look like a date,
-                but they are part of the order number and nothing else. Do NOT convert
-                them, and do NOT let them influence pickup_date in any way.
+              - the order number, in EITHER format. The leading digits of "260630-01" may
+                look like a date, and a WebOrder number such as "WOO0000006176714" is
+                nothing but digits, but they are part of the order number and nothing
+                else. Do NOT convert them, and do NOT let them influence pickup_date in
+                any way.
               - a document creation date, print date, invoice date or delivery date
               - the current date, or a date taken from the file name
               - any other guess or inference
@@ -321,9 +371,10 @@ class DeliveryNoteProcessorService
                 'ocr_result' => Str::limit($ocrContent, $this->getMaxOcrChatToSave(), ''),
             ]);
 
-            // Frachtbrief is checked FIRST because its identifying signal (an
-            // `Order Nummer` shaped like YYMMDD-NN) is much more specific than
-            // the production-order heuristics. Every failure mode of this block
+            // Frachtbrief is checked FIRST because its identifying signals (an
+            // `Order Nummer` shaped like YYMMDD-NN, or a Rhenus `WebOrdernr.`
+            // shaped like WOO + digits) are much more specific than the
+            // production-order heuristics. Every failure mode of this block
             // — agent exception, malformed JSON, low confidence, no order-number
             // evidence — yields null/false and falls through to the untouched
             // production-order and delivery-note flow below.
@@ -690,12 +741,24 @@ class DeliveryNoteProcessorService
      *      normalizeFrachtbriefContent() only accepts real booleans, matching
      *      the existing production-order convention)
      *   2. `document_confidence` is present and at/above the project threshold
-     *   3. corroborating evidence for the order number exists — either an
-     *      extracted value in the expected YYMMDD-NN shape, or an
-     *      `Order Nummer`-style label with such a value in the raw OCR text
+     *   3. corroborating evidence for the order number exists — see below
+     *
+     * The evidence is checked in descending order of specificity, so the
+     * original `Order Nummer` signal always decides first and the Rhenus
+     * WebOrder signal is only consulted when it found nothing:
+     *
+     *   a) an extracted value that sanitizes to a usable order number (either
+     *      the YYMMDD-NN or the WOO shape)
+     *   b) an `Order Nummer`-style label with a YYMMDD-NN value in the raw OCR
+     *   c) a `WebOrdernr.`-style label with a WOO value in the raw OCR
+     *   d) a bare WOO value in the raw OCR, but ONLY together with `Rhenus` or
+     *      `Frachtbrief` — unlabelled, it is too weak on its own
      *
      * Anything less returns false and the document continues through the
      * untouched production-order / delivery-note flow.
+     *
+     * None of these patterns classifies anything by itself: they can only
+     * confirm or veto a decision the agent already made under (1) and (2).
      */
     public function isConfirmedFrachtbrief(?object $messageContent, string $ocrContent): bool
     {
@@ -716,7 +779,16 @@ class DeliveryNoteProcessorService
             return true;
         }
 
-        return preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1;
+        if (preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1) {
+            return true;
+        }
+
+        if (preg_match(self::FRACHTBRIEF_WEBORDER_PATTERN, $ocrContent) === 1) {
+            return true;
+        }
+
+        return preg_match(self::FRACHTBRIEF_WEBORDER_BARE_PATTERN, $ocrContent) === 1
+            && preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1;
     }
 
     /**
