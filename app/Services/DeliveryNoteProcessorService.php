@@ -49,7 +49,6 @@ class DeliveryNoteProcessorService
      * happens purely in PHP — the OpenAI prompt is not involved.
      */
     public const FRACHTBRIEF_SUBFOLDER_RHENUS = 'Rhenus';
-    public const FRACHTBRIEF_SUBFOLDER_UPS = 'UPS';
     public const FRACHTBRIEF_SUBFOLDER_SONSTIGE = 'Sonstige';
 
     /**
@@ -602,7 +601,7 @@ class DeliveryNoteProcessorService
      *
      * When the file is actually filed into the Frachtbrief destination (order
      * number present), it is routed into a customer-specific subfolder
-     * (Rhenus / UPS / Sonstige) below the configured base folder, decided from
+     * (Rhenus / Sonstige) below the configured base folder, decided from
      * the best available recipient company name. A Frachtbrief WITHOUT an order
      * number still goes to the existing unknown folder — the subfolder routing
      * deliberately does not apply there.
@@ -652,9 +651,13 @@ class DeliveryNoteProcessorService
      * a recipient company name. Matching is case-insensitive and substring-based:
      *
      *   - contains "Rhenus" → Rhenus
-     *   - contains "UPS"    → UPS
      *   - anything else, a missing/empty name, or the `xxxxxx` placeholder
      *                       → Sonstige
+     *
+     * There used to be a dedicated UPS subfolder. It was removed because the
+     * separate filing is no longer wanted: UPS documents are ordinary
+     * Frachtbriefe and now land in Sonstige. Only their destination changed —
+     * detection, the company slug and the filename are all unaffected.
      *
      * This is intentionally small and isolated so it can be unit-tested in
      * isolation. It must never call OpenAI — the routing decision is made
@@ -668,10 +671,6 @@ class DeliveryNoteProcessorService
 
         if (Str::contains($companyName, 'rhenus', ignoreCase: true)) {
             return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
-        }
-
-        if (Str::contains($companyName, 'ups', ignoreCase: true)) {
-            return self::FRACHTBRIEF_SUBFOLDER_UPS;
         }
 
         return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;

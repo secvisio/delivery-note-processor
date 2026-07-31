@@ -798,7 +798,7 @@ it('accepts a frachtbrief payload wrapped in a single-element array', function (
 
 /*
 |--------------------------------------------------------------------------
-| Frachtbrief subfolder routing (Rhenus / UPS / Sonstige)
+| Frachtbrief subfolder routing (Rhenus / Sonstige)
 |--------------------------------------------------------------------------
 */
 
@@ -815,10 +815,14 @@ it('routes Rhenus recipient companies to the Rhenus subfolder', function (string
     'rhenus-logistics',                 // resolved slug shape
 ]);
 
-it('routes UPS recipient companies to the UPS subfolder', function (string $company) {
+/*
+| The dedicated UPS subfolder was removed. UPS recipients are ordinary
+| Frachtbriefe and now route to Sonstige like every other non-Rhenus carrier.
+*/
+it('routes UPS recipient companies to the Sonstige subfolder', function (string $company) {
     $service = new DeliveryNoteProcessorService();
 
-    expect($service->resolveFrachtbriefSubfolder($company))->toBe('UPS');
+    expect($service->resolveFrachtbriefSubfolder($company))->toBe('Sonstige');
 })->with([
     'UPS',
     'UPS Deutschland',
@@ -853,7 +857,7 @@ it('resolves a Rhenus destination inside the frachtbrief base folder', function 
         ->and($destination['filename'])->toBe('FB_rhenus-logistics_2026-07-27_260727-01.pdf');
 });
 
-it('resolves a UPS destination inside the frachtbrief base folder', function () {
+it('resolves a UPS destination into Sonstige without touching the filename', function () {
     $service = new DeliveryNoteProcessorService();
 
     $process = new Process();
@@ -862,8 +866,9 @@ it('resolves a UPS destination inside the frachtbrief base folder', function () 
     $destination = $service->resolveFrachtbriefDestination($process, 'ups-deutschland', '2026-07-27', '260727-02');
 
     expect($destination['is_unknown'])->toBeFalse()
-        ->and($destination['subfolder'])->toBe('UPS')
-        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/UPS')
+        ->and($destination['subfolder'])->toBe('Sonstige')
+        ->and($destination['folder'])->toBe(config('delivery_note_processor.frachtbrief_folder') . '/Sonstige')
+        // The company segment is unaffected by the routing change.
         ->and($destination['filename'])->toBe('FB_ups-deutschland_2026-07-27_260727-02.pdf');
 });
 
@@ -936,7 +941,7 @@ it('writes a Rhenus frachtbrief into the Rhenus subfolder with an unchanged file
         ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($result->target_file_path))->toBeTrue();
 });
 
-it('writes a UPS frachtbrief into the UPS subfolder with an unchanged filename', function () {
+it('writes a UPS frachtbrief into the Sonstige subfolder with an unchanged filename', function () {
     $ocr = "Order Nummer: 260630-01\nEmpfaenger: UPS Deutschland\nAbholdatum: 30.06.2026\n";
 
     $processor = (new FakeAgentProcessor())
@@ -947,10 +952,19 @@ it('writes a UPS frachtbrief into the UPS subfolder with an unchanged filename',
 
     $result = $processor->run(storedProcess());
 
-    $folder = config('delivery_note_processor.frachtbrief_folder') . '/UPS';
+    $folder = config('delivery_note_processor.frachtbrief_folder') . '/Sonstige';
 
+    // Still a Frachtbrief, still the same filename and company slug — only the
+    // destination subfolder changed.
     expect($result->document_type)->toBe(DeliveryNoteProcessorService::DOCUMENT_TYPE_FRACHTBRIEF)
+        ->and($result->frachtbrief_recipient_company)->toBe('UPS Deutschland')
         ->and(dirname($result->target_file_path))->toBe($folder)
         ->and(basename($result->target_file_path))->toBe('FB_ups-deutschland_2026-06-30_260630-01.pdf')
         ->and(Storage::disk(config('delivery_note_processor.delivery_notes_disk'))->exists($result->target_file_path))->toBeTrue();
+});
+
+it('no longer exposes a UPS subfolder constant', function () {
+    expect(defined(DeliveryNoteProcessorService::class . '::FRACHTBRIEF_SUBFOLDER_UPS'))->toBeFalse()
+        ->and(DeliveryNoteProcessorService::FRACHTBRIEF_SUBFOLDER_RHENUS)->toBe('Rhenus')
+        ->and(DeliveryNoteProcessorService::FRACHTBRIEF_SUBFOLDER_SONSTIGE)->toBe('Sonstige');
 });
