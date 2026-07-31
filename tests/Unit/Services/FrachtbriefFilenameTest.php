@@ -49,6 +49,54 @@ it('rejects order numbers that do not match the expected shape', function (?stri
     'AB1234-01',      // not numeric
 ]);
 
+/*
+|--------------------------------------------------------------------------
+| Rhenus WebOrder numbers (`WOO` + digits)
+|--------------------------------------------------------------------------
+|
+| The second accepted order-number shape. Unlike `YYMMDD-NN` it carries
+| letters, so it must survive the sanitizer intact — the whole value is the
+| document's primary identifier.
+*/
+
+it('keeps a rhenus weborder number intact', function () {
+    expect(FilenameNormalizer::sanitizeOrderNumber('WOO0000006176714'))->toBe('WOO0000006176714');
+});
+
+it('canonicalizes the weborder prefix to uppercase WOO', function (string $input) {
+    expect(FilenameNormalizer::sanitizeOrderNumber($input))->toBe('WOO0000006176714');
+})->with([
+    'woo0000006176714',                 // lowercased by the LLM
+    'W000000006176714',                 // OCR read both O's as zeros
+    'WO00000006176714',                 // OCR read the second O as a zero
+    'Woo0000006176714',                 // mixed case
+    'WOO 0000006176714',                // whitespace after the prefix
+    '  WOO0000006176714  ',             // surrounding whitespace
+]);
+
+it('normalizes a weborder number idempotently', function () {
+    // sanitizeOrderNumber() runs three times on the same value during one
+    // processing run (evidence check, destination, filename) — all three must
+    // agree, or the routing decision and the filename would disagree.
+    $once = FilenameNormalizer::sanitizeOrderNumber('woo0000006176714');
+    $twice = FilenameNormalizer::sanitizeOrderNumber($once);
+
+    expect($twice)->toBe($once)
+        ->and(FilenameNormalizer::sanitizeOrderNumber($twice))->toBe($once);
+});
+
+it('rejects weborder-ish values that are not real weborder numbers', function (string $input) {
+    expect(FilenameNormalizer::sanitizeOrderNumber($input))->toBe('');
+})->with([
+    'WOO123',                           // too few digits to be an identifier
+    'WOOABCDEF',                        // no digits at all
+    'WOO',                              // prefix only
+    'VOO0000006176714',                 // different leading letter
+    'WOOD0000006176714',                // different prefix entirely
+    'WOO123456789012345678901',         // more digits than the accepted range
+    'WOO-0000006176714',                // hyphen is not part of this format
+]);
+
 it('does not let sanitizeIdentifier be used for order numbers', function () {
     // Guards the reason the dedicated normalizer exists at all.
     expect(FilenameNormalizer::sanitizeIdentifier('260630-01'))->toBe('26063001')
@@ -159,6 +207,30 @@ it('falls back to the wall clock when no timestamp is supplied for a partial fil
         ->toBe('FB_xxxxxx_2026-06-30_260630-01_20260724143025.pdf');
 
     Carbon\Carbon::setTestNow();
+});
+
+it('builds the canonical filename from a rhenus weborder number', function () {
+    expect(FileRenamingService::generateFrachtbrief('rhenus', '2026-07-31', 'WOO0000006176714', 'pdf'))
+        ->toBe('FB_rhenus_2026-07-31_WOO0000006176714.pdf');
+});
+
+it('preserves the full weborder value when the pickup date falls back', function () {
+    $filename = FileRenamingService::generateFrachtbrief('rhenus', null, 'WOO0000006176714', 'pdf', '20260731110000');
+
+    expect($filename)->toBe('FB_rhenus_xxxxxx_WOO0000006176714_20260731110000.pdf')
+        ->and($filename)->toContain('WOO0000006176714');
+});
+
+it('preserves the full weborder value when company and pickup date fall back', function () {
+    expect(FileRenamingService::generateFrachtbrief(null, null, 'WOO0000006176714', 'pdf', '20260731110000'))
+        ->toBe('FB_xxxxxx_xxxxxx_WOO0000006176714_20260731110000.pdf');
+});
+
+it('does not read a pickup date out of a weborder number', function () {
+    // The value is nothing but digits; none of them may become a date.
+    expect(FilenameNormalizer::sanitizePickupDate('WOO0000006176714'))->toBe('')
+        ->and(FileRenamingService::generateFrachtbrief('rhenus', null, 'WOO0000006176714', 'pdf', '20260731110000'))
+        ->not->toContain('2026-06-17');
 });
 
 it('restricts the frachtbrief extension to the existing whitelist', function () {

@@ -61,13 +61,16 @@ return [
     | Within this base folder, confirmed Frachtbriefe are filed into fixed,
     | customer-specific subfolders decided deterministically in PHP from the
     | recipient company name (DeliveryNoteProcessorService::resolveFrachtbrief-
-    | Subfolder): `Rhenus`, `UPS` and `Sonstige`. These subfolders are NOT
-    | separate env vars. For the fixed production path
-    | (/mnt/laufwerk/Frachtbriefe) the three subfolders must exist before
-    | deployment — the application never creates or chmods them:
+    | Subfolder): `Rhenus` and `Sonstige`. These subfolders are NOT separate
+    | env vars. For the fixed production path (/mnt/laufwerk/Frachtbriefe) both
+    | subfolders must exist before deployment — the application never creates
+    | or chmods them:
     |     /mnt/laufwerk/Frachtbriefe/Rhenus
-    |     /mnt/laufwerk/Frachtbriefe/UPS
     |     /mnt/laufwerk/Frachtbriefe/Sonstige
+    |
+    | A `UPS` subfolder existed previously and is no longer written to; UPS
+    | recipients now go to `Sonstige`. Any existing UPS folder and the files
+    | already in it are left alone — nothing is migrated or rewritten.
     |
     */
 

@@ -49,7 +49,6 @@ class DeliveryNoteProcessorService
      * happens purely in PHP — the OpenAI prompt is not involved.
      */
     public const FRACHTBRIEF_SUBFOLDER_RHENUS = 'Rhenus';
-    public const FRACHTBRIEF_SUBFOLDER_UPS = 'UPS';
     public const FRACHTBRIEF_SUBFOLDER_SONSTIGE = 'Sonstige';
 
     /**
@@ -60,6 +59,51 @@ class DeliveryNoteProcessorService
      */
     private const FRACHTBRIEF_ORDER_LABEL_PATTERN =
         '/[o0]rder\s*[-]?\s*(?:nummer|numner|nunmer|nr\.?|no\.?)\s*[:.]?\s*\d{6}\s*[-\x{2010}-\x{2015}\x{2212}]?\s*\d{2}/iu';
+
+    /**
+     * Secondary, Rhenus-specific corroboration: a `WebOrdernr.` label followed
+     * by a `WOO`-prefixed value. The label and the value must appear together,
+     * which is what makes this specific enough to stand on its own — the same
+     * way the `Order Nummer` label pattern above does. Spacing, hyphenation,
+     * the trailing dot/colon and `O`/`0` OCR confusion are all tolerated.
+     */
+    private const FRACHTBRIEF_WEBORDER_PATTERN =
+        '/\bweb\s*[-]?\s*[o0]rder\s*[-]?\s*(?:nr|nummer|no)?\.?\s*:?\s*W[O0]{2}\d{8,20}\b/iu';
+
+    /**
+     * The same labelled pattern, capturing the value. Used to read the WebOrder
+     * number straight out of the OCR text: the label makes the value
+     * unambiguous, so this is more trustworthy than a model transcription,
+     * which has been observed to drop a character (`WOO…` → `WO…`).
+     */
+    private const FRACHTBRIEF_WEBORDER_CAPTURE_PATTERN =
+        '/\bweb\s*[-]?\s*[o0]rder\s*[-]?\s*(?:nr|nummer|no)?\.?\s*:?\s*(W[O0]{2}\d{8,20})\b/iu';
+
+    /**
+     * A `WOO`-prefixed value WITHOUT its label. Far weaker evidence than the
+     * pattern above — a bare token could be a tracking reference quoted on an
+     * ordinary Lieferschein — so it is never accepted on its own; see
+     * isConfirmedFrachtbrief(), which additionally requires the corroboration
+     * pattern below. The digit floor is deliberately higher than in the
+     * labelled variant for the same reason.
+     */
+    private const FRACHTBRIEF_WEBORDER_BARE_PATTERN = '/\bW[O0]{2}\d{10,20}\b/iu';
+
+    /**
+     * Optional corroborating terms for a Rhenus WebOrder document. These are
+     * NEVER required alongside a correctly labelled WebOrder number — they only
+     * unlock the bare, unlabelled variant above.
+     */
+    private const FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN = '/\b(?:rhenus|frachtbrief)\b/iu';
+
+    /**
+     * CARRIER evidence, used exclusively for subfolder routing — not for
+     * classification. Deliberately narrower than the corroboration pattern
+     * above: "Frachtbrief" identifies the document TYPE and says nothing about
+     * who carries it, so it must never select the Rhenus subfolder. Only the
+     * carrier's own name does.
+     */
+    private const FRACHTBRIEF_RHENUS_CARRIER_PATTERN = '/\brhenus\b/iu';
 
     /**
      * @var string|null
@@ -142,8 +186,9 @@ class DeliveryNoteProcessorService
     /**
      * Prompt for the Frachtbrief (freight waybill) classification + extraction
      * agent. Runs FIRST, before the production-order agent, because its
-     * identifying signal — an `Order Nummer` shaped like `YYMMDD-NN` — is far
-     * more specific than the production-order layout heuristics.
+     * identifying signals — an `Order Nummer` shaped like `YYMMDD-NN`, or the
+     * Rhenus `WebOrdernr.` value shaped like `WOO` + digits — are far more
+     * specific than the production-order layout heuristics.
      *
      * The prompt is deliberately strict about NOT treating a generic
      * Bestellnummer/Auftragsnummer as proof: ordinary Lieferscheine routinely
@@ -167,6 +212,20 @@ class DeliveryNoteProcessorService
             OCR; treat all of these as the same field:
               Order Nummer, Ordernummer, Order Nr., Order-Nr., 0rder Nummer, 0rder Numner
 
+            SECONDARY IDENTIFYING SIGNAL — RHENUS WEBORDER
+            Only when NO valid "Order Nummer" in the YYMMDD-NN format above is present,
+            a document may ALSO be a Frachtbrief when it carries a WebOrder field whose
+            value starts with WOO followed by digits, for example:
+              WebOrdernr. WOO0000006176714
+              WebOrdernr WOO0000006176714
+              WebOrder-Nr. WOO0000006176714
+              Web Order Nr. WOO0000006176714
+              WebOrdernr.: WOO0000006176714
+              Web0rdernr. WOO0000006176714
+            A correctly labelled WebOrder value is on its own sufficient evidence for a
+            Frachtbrief. If the document additionally contains "Rhenus" or "Frachtbrief",
+            that is stronger corroborating evidence and document_confidence may reflect it.
+
             SUPPORTING SIGNALS (corroboration, not proof on their own)
               Abholdatum, Empfaenger, Empfänger, Absender, Frachtfuehrer, Frachtführer,
               Ladestelle, Entladestelle, CMR
@@ -176,10 +235,16 @@ class DeliveryNoteProcessorService
             "Order" reference does NOT make a document a Frachtbrief. Ordinary delivery notes
             (Lieferscheine) and invoices frequently contain a customer order reference. Set
             is_frachtbrief to false unless you find an Order Nummer in the YYMMDD-NN shape, or
-            the document is otherwise unmistakably a freight waybill.
+            a labelled WebOrder number as described above, or the document is otherwise
+            unmistakably a freight waybill. A bare "WOO..." token without a WebOrder label is
+            NOT enough on its own.
 
             VALUES TO EXTRACT
-              - order_number      : the Order Nummer, keep the hyphen, e.g. "260630-01"
+              - order_number      : the Order Nummer, keep the hyphen, e.g. "260630-01".
+                                    When — and only when — no Order Nummer in the YYMMDD-NN
+                                    format is present, return the complete WebOrder number
+                                    INCLUDING its WOO prefix instead, e.g. "WOO0000006176714".
+                                    Never invent, derive, shorten or drop the WOO prefix.
               - pickup_date       : the Abholdatum, NORMALIZED to YYYY-MM-DD
                                     ("30.06.2026" and "30/06/2026" both become "2026-06-30")
               - recipient_company : the receiving company (Firma / Empfaengername)
@@ -190,9 +255,11 @@ class DeliveryNoteProcessorService
               Abholdatum, Abhol-Datum, Datum der Abholung, Pickup Date, Collection Date
 
             NEVER produce a pickup_date from any of the following:
-              - the order number. The leading digits of "260630-01" may look like a date,
-                but they are part of the order number and nothing else. Do NOT convert
-                them, and do NOT let them influence pickup_date in any way.
+              - the order number, in EITHER format. The leading digits of "260630-01" may
+                look like a date, and a WebOrder number such as "WOO0000006176714" is
+                nothing but digits, but they are part of the order number and nothing
+                else. Do NOT convert them, and do NOT let them influence pickup_date in
+                any way.
               - a document creation date, print date, invoice date or delivery date
               - the current date, or a date taken from the file name
               - any other guess or inference
@@ -321,9 +388,10 @@ class DeliveryNoteProcessorService
                 'ocr_result' => Str::limit($ocrContent, $this->getMaxOcrChatToSave(), ''),
             ]);
 
-            // Frachtbrief is checked FIRST because its identifying signal (an
-            // `Order Nummer` shaped like YYMMDD-NN) is much more specific than
-            // the production-order heuristics. Every failure mode of this block
+            // Frachtbrief is checked FIRST because its identifying signals (an
+            // `Order Nummer` shaped like YYMMDD-NN, or a Rhenus `WebOrdernr.`
+            // shaped like WOO + digits) are much more specific than the
+            // production-order heuristics. Every failure mode of this block
             // — agent exception, malformed JSON, low confidence, no order-number
             // evidence — yields null/false and falls through to the untouched
             // production-order and delivery-note flow below.
@@ -484,7 +552,7 @@ class DeliveryNoteProcessorService
             $ocrContent
         );
 
-        $orderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
+        $orderNumber = $this->resolveFrachtbriefOrderNumber($messageContent, $ocrContent);
         $pickupDate = $this->resolveFrachtbriefPickupDate($messageContent);
 
         $destination = $this->resolveFrachtbriefDestination(
@@ -492,7 +560,8 @@ class DeliveryNoteProcessorService
             $resolvedCompanyName,
             $pickupDate,
             $orderNumber,
-            $messageContent->recipient_company ?? null
+            $messageContent->recipient_company ?? null,
+            $ocrContent
         );
 
         $process->document_type = self::DOCUMENT_TYPE_FRACHTBRIEF;
@@ -550,17 +619,23 @@ class DeliveryNoteProcessorService
      * delivery notes.
      *
      * When the file is actually filed into the Frachtbrief destination (order
-     * number present), it is routed into a customer-specific subfolder
-     * (Rhenus / UPS / Sonstige) below the configured base folder, decided from
-     * the best available recipient company name. A Frachtbrief WITHOUT an order
-     * number still goes to the existing unknown folder — the subfolder routing
-     * deliberately does not apply there.
+     * number present), it is routed into a CARRIER-specific subfolder
+     * (Rhenus / Sonstige) below the configured base folder. A Frachtbrief
+     * WITHOUT an order number still goes to the existing unknown folder — the
+     * subfolder routing deliberately does not apply there.
      *
-     * The company value used for routing prefers the resolved canonical slug
-     * (`$resolvedCompanyName`) and falls back to the raw extracted recipient
-     * name (`$rawRecipientCompany`) when no canonical match exists, so a
-     * recognizable carrier still routes correctly even when it is absent from
-     * the company table and the filename shows the `xxxxxx` placeholder.
+     * The subfolder and the filename answer two DIFFERENT questions and are
+     * fed from different values: the filename names the RECIPIENT company,
+     * while the subfolder names the CARRIER. On a real Rhenus waybill the
+     * recipient is the customer (e.g. "Orthomol Pharmazeutische Vertricos
+     * GmbH"), so deriving the carrier from the recipient filed those documents
+     * under Sonstige. See resolveFrachtbriefSubfolder() for the carrier rules.
+     *
+     * The company value used as the LAST carrier fallback prefers the resolved
+     * canonical slug (`$resolvedCompanyName`) and falls back to the raw
+     * extracted recipient name (`$rawRecipientCompany`), so a recipient that
+     * happens to be the carrier still routes correctly even when it is absent
+     * from the company table and the filename shows the `xxxxxx` placeholder.
      *
      * @return array{folder: string, filename: string, is_unknown: bool, subfolder: string}
      */
@@ -569,7 +644,8 @@ class DeliveryNoteProcessorService
         ?string $resolvedCompanyName,
         ?string $pickupDate,
         ?string $orderNumber,
-        ?string $rawRecipientCompany = null
+        ?string $rawRecipientCompany = null,
+        ?string $ocrContent = null
     ): array
     {
         $orderNumber = FilenameNormalizer::sanitizeOrderNumber($orderNumber);
@@ -578,7 +654,11 @@ class DeliveryNoteProcessorService
         // the file needs a human, so it goes to the existing unknown folder.
         $isUnknown = $orderNumber === '';
 
-        $subfolder = $this->resolveFrachtbriefSubfolder($resolvedCompanyName ?? $rawRecipientCompany);
+        $subfolder = $this->resolveFrachtbriefSubfolder(
+            $resolvedCompanyName ?? $rawRecipientCompany,
+            $orderNumber,
+            $ocrContent
+        );
 
         return [
             'folder' => $isUnknown
@@ -597,33 +677,120 @@ class DeliveryNoteProcessorService
     }
 
     /**
-     * Deterministically resolve the customer-specific Frachtbrief subfolder from
-     * a recipient company name. Matching is case-insensitive and substring-based:
+     * Deterministically resolve the CARRIER-specific Frachtbrief subfolder.
      *
-     *   - contains "Rhenus" → Rhenus
-     *   - contains "UPS"    → UPS
-     *   - anything else, a missing/empty name, or the `xxxxxx` placeholder
-     *                       → Sonstige
+     * The carrier is not the recipient. A Rhenus waybill names the customer as
+     * the Empfänger, so the recipient company alone — which is all this method
+     * used to receive — cannot identify the carrier, and real Rhenus documents
+     * were filed under Sonstige because of it. Three signals are consulted, in
+     * descending order of directness:
+     *
+     *   1. the raw OCR text names "Rhenus"        → Rhenus
+     *   2. the order number is a WebOrder number  → Rhenus
+     *      (`WOO` + digits is Rhenus' own numbering scheme, so the identifier
+     *       itself names the carrier)
+     *   3. the recipient company contains "Rhenus" → Rhenus
+     *      (unchanged legacy rule: covers documents where Rhenus IS the
+     *       recipient, and older scans that carry neither of the above)
+     *   4. anything else, a missing/empty name, or the `xxxxxx` placeholder
+     *                                              → Sonstige
+     *
+     * The word "Frachtbrief" is deliberately NOT carrier evidence: it names the
+     * document type, not who carries it. That is why this method uses the
+     * narrow FRACHTBRIEF_RHENUS_CARRIER_PATTERN and not the broader
+     * corroboration pattern used during classification.
+     *
+     * Routing is independent of classification: a document reaches this method
+     * only after isConfirmedFrachtbrief() already agreed, and nothing here can
+     * make or unmake that decision. A Frachtbrief without a usable order number
+     * never gets here in a meaningful way — the caller sends it to the unknown
+     * folder regardless of the subfolder computed.
+     *
+     * The two trailing parameters are optional so the historical
+     * "route by recipient company" call remains valid.
      *
      * This is intentionally small and isolated so it can be unit-tested in
      * isolation. It must never call OpenAI — the routing decision is made
      * exclusively in PHP.
      */
-    public function resolveFrachtbriefSubfolder(?string $companyName): string
+    public function resolveFrachtbriefSubfolder(
+        ?string $companyName,
+        ?string $orderNumber = null,
+        ?string $ocrContent = null
+    ): string
     {
-        if ($companyName === null) {
-            return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
-        }
-
-        if (Str::contains($companyName, 'rhenus', ignoreCase: true)) {
+        if ($ocrContent !== null && preg_match(self::FRACHTBRIEF_RHENUS_CARRIER_PATTERN, $ocrContent) === 1) {
             return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
         }
 
-        if (Str::contains($companyName, 'ups', ignoreCase: true)) {
-            return self::FRACHTBRIEF_SUBFOLDER_UPS;
+        if ($this->isWebOrderNumber($orderNumber)) {
+            return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
+        }
+
+        if ($companyName !== null && Str::contains($companyName, 'rhenus', ignoreCase: true)) {
+            return self::FRACHTBRIEF_SUBFOLDER_RHENUS;
         }
 
         return self::FRACHTBRIEF_SUBFOLDER_SONSTIGE;
+    }
+
+    /**
+     * Whether an order number is a Rhenus WebOrder number.
+     *
+     * The value is put through the shared normalizer rather than matched
+     * against a second WebOrder regex, so there is exactly one definition of
+     * what a valid WebOrder number is. sanitizeOrderNumber() emits only two
+     * shapes — `YYMMDD-NN` and the canonical `WOO` + digits — which makes the
+     * prefix check unambiguous, and it is idempotent, so an already-normalized
+     * value is safe to pass in.
+     */
+    private function isWebOrderNumber(?string $orderNumber): bool
+    {
+        return str_starts_with(
+            FilenameNormalizer::sanitizeOrderNumber($orderNumber),
+            FilenameNormalizer::WEBORDER_PREFIX
+        );
+    }
+
+    /**
+     * Decide the order-number filename segment, reconciling the agent's value
+     * with a labelled WebOrder number read directly from the OCR text.
+     *
+     * The agent transcribes; OCR with an unambiguous label does not. A model
+     * has been observed returning `WO…` for a `WOO…` value, and because the
+     * normalizer tolerates `O`/`0` confusion in the prefix, such a value does
+     * NOT fail loudly — it silently normalizes to a different number, one digit
+     * short of the real one, and that wrong identifier would end up in the
+     * filename and in the database.
+     *
+     * The OCR value therefore wins, but only in the two cases where it is
+     * unambiguously better:
+     *   - the agent produced nothing usable, or
+     *   - the agent produced a WebOrder-shaped value, i.e. both are describing
+     *     the same field and the labelled OCR spelling is authoritative
+     *
+     * A numeric `YYMMDD-NN` value from the agent always keeps priority: that is
+     * the primary identifier, and a WebOrder number is only ever the fallback.
+     */
+    private function resolveFrachtbriefOrderNumber(object $messageContent, string $ocrContent): string
+    {
+        $agentOrderNumber = FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null);
+        $ocrOrderNumber = $this->extractWebOrderNumberFromOcr($ocrContent);
+
+        if ($ocrOrderNumber === null || $ocrOrderNumber === $agentOrderNumber) {
+            return $agentOrderNumber;
+        }
+
+        if ($agentOrderNumber === '' || $this->isWebOrderNumber($agentOrderNumber)) {
+            Log::info('Frachtbrief order number taken from the labelled OCR field', [
+                'agent_order_number' => $agentOrderNumber !== '' ? $agentOrderNumber : null,
+                'ocr_weborder_number' => $ocrOrderNumber,
+            ]);
+
+            return $ocrOrderNumber;
+        }
+
+        return $agentOrderNumber;
     }
 
     /**
@@ -690,12 +857,24 @@ class DeliveryNoteProcessorService
      *      normalizeFrachtbriefContent() only accepts real booleans, matching
      *      the existing production-order convention)
      *   2. `document_confidence` is present and at/above the project threshold
-     *   3. corroborating evidence for the order number exists — either an
-     *      extracted value in the expected YYMMDD-NN shape, or an
-     *      `Order Nummer`-style label with such a value in the raw OCR text
+     *   3. corroborating evidence for the order number exists — see below
+     *
+     * The evidence is checked in descending order of specificity, so the
+     * original `Order Nummer` signal always decides first and the Rhenus
+     * WebOrder signal is only consulted when it found nothing:
+     *
+     *   a) an extracted value that sanitizes to a usable order number (either
+     *      the YYMMDD-NN or the WOO shape)
+     *   b) an `Order Nummer`-style label with a YYMMDD-NN value in the raw OCR
+     *   c) a `WebOrdernr.`-style label with a WOO value in the raw OCR
+     *   d) a bare WOO value in the raw OCR, but ONLY together with `Rhenus` or
+     *      `Frachtbrief` — unlabelled, it is too weak on its own
      *
      * Anything less returns false and the document continues through the
      * untouched production-order / delivery-note flow.
+     *
+     * None of these patterns classifies anything by itself: they can only
+     * confirm or veto a decision the agent already made under (1) and (2).
      */
     public function isConfirmedFrachtbrief(?object $messageContent, string $ocrContent): bool
     {
@@ -703,20 +882,135 @@ class DeliveryNoteProcessorService
             return false;
         }
 
+        if ($this->agentConfirmsFrachtbrief($messageContent)
+            && $this->hasOrderNumberEvidence($messageContent, $ocrContent)) {
+            return true;
+        }
+
+        // Deterministic rescue. The agent decides alone otherwise, and it is a
+        // single non-deterministic call (no temperature, no seed, no schema
+        // enforcement): one wobble in `is_frachtbrief` or `document_confidence`
+        // silently demotes a Frachtbrief into the delivery-note flow, which is
+        // exactly what happened to a real Rhenus waybill in production. A
+        // LABELLED WebOrder number together with an explicit `Rhenus` or
+        // `Frachtbrief` mention is specific enough to hold the classification
+        // on its own.
+        //
+        // The trade is deliberate and narrow: a Lieferschein that both quotes a
+        // labelled WebOrder field AND names Rhenus/Frachtbrief is now filed as a
+        // Frachtbrief even when the agent says otherwise. A bare `WOO…` token
+        // still cannot do this — the label is mandatory here.
+        if ($this->hasLabelledWebOrderEvidence($ocrContent)
+            && preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1) {
+            Log::info('Frachtbrief confirmed from deterministic WebOrder evidence', [
+                'is_frachtbrief' => $messageContent->is_frachtbrief ?? null,
+                'document_confidence' => $messageContent->document_confidence ?? null,
+                'threshold' => $this->getThreshold(),
+                'ocr_weborder_number' => $this->extractWebOrderNumberFromOcr($ocrContent),
+            ]);
+
+            return true;
+        }
+
+        $this->logFrachtbriefRejection($messageContent, $ocrContent);
+
+        return false;
+    }
+
+    /**
+     * The model's own verdict: a real boolean true AND a self-reported
+     * certainty at/above the project threshold. Unchanged in substance — only
+     * lifted out of isConfirmedFrachtbrief() so the deterministic rescue can be
+     * expressed as a separate, clearly bounded branch.
+     */
+    private function agentConfirmsFrachtbrief(object $messageContent): bool
+    {
         if (($messageContent->is_frachtbrief ?? null) !== true) {
             return false;
         }
 
         $confidence = $messageContent->document_confidence ?? null;
-        if ($confidence === null || $confidence < $this->getThreshold()) {
-            return false;
-        }
 
+        return $confidence !== null && $confidence >= $this->getThreshold();
+    }
+
+    /**
+     * Corroborating evidence for the order number, in descending specificity:
+     * an extracted value that normalizes, the original `Order Nummer` label,
+     * a labelled `WebOrdernr.`, and finally a bare WebOrder value that counts
+     * only alongside `Rhenus`/`Frachtbrief`. Extracted verbatim from the
+     * previous inline implementation.
+     */
+    private function hasOrderNumberEvidence(object $messageContent, string $ocrContent): bool
+    {
         if (FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null) !== '') {
             return true;
         }
 
-        return preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1;
+        if (preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1) {
+            return true;
+        }
+
+        if ($this->hasLabelledWebOrderEvidence($ocrContent)) {
+            return true;
+        }
+
+        return preg_match(self::FRACHTBRIEF_WEBORDER_BARE_PATTERN, $ocrContent) === 1
+            && preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1;
+    }
+
+    private function hasLabelledWebOrderEvidence(string $ocrContent): bool
+    {
+        return preg_match(self::FRACHTBRIEF_WEBORDER_PATTERN, $ocrContent) === 1;
+    }
+
+    /**
+     * Read a LABELLED WebOrder number straight out of the OCR text and return
+     * it in canonical form, or null when the text carries no such field.
+     *
+     * The label is what makes this safe: an unlabelled `WOO…` token is ignored
+     * here, so an order or invoice reference quoted on some other document can
+     * never be mistaken for a Frachtbrief identifier. The captured value goes
+     * through the shared normalizer, so `W00…`/`WO0…` OCR confusion collapses
+     * onto the same canonical `WOO…` value as everywhere else.
+     */
+    public function extractWebOrderNumberFromOcr(string $ocrContent): ?string
+    {
+        if (preg_match(self::FRACHTBRIEF_WEBORDER_CAPTURE_PATTERN, $ocrContent, $matches) !== 1) {
+            return null;
+        }
+
+        $normalized = FilenameNormalizer::sanitizeOrderNumber($matches[1]);
+
+        return $normalized !== '' ? $normalized : null;
+    }
+
+    /**
+     * Diagnostic trail for a rejected Frachtbrief, so the next occurrence can
+     * be diagnosed from the log instead of by reasoning backwards from the
+     * final filename. Deliberately `debug`: every delivery note and production
+     * order passes through here, so this must not become routine log noise.
+     *
+     * The OCR text itself is NOT logged — it is customer data. Only the
+     * outcome of each condition and the extracted identifier are recorded.
+     */
+    private function logFrachtbriefRejection(object $messageContent, string $ocrContent): void
+    {
+        Log::debug('Frachtbrief not confirmed, falling through to the existing flow', [
+            'is_frachtbrief' => $messageContent->is_frachtbrief ?? null,
+            'document_confidence' => $messageContent->document_confidence ?? null,
+            'threshold' => $this->getThreshold(),
+            'normalized_agent_order_number' =>
+                FilenameNormalizer::sanitizeOrderNumber($messageContent->order_number ?? null),
+            'ocr_weborder_number' => $this->extractWebOrderNumberFromOcr($ocrContent),
+            'numeric_order_pattern_matched' =>
+                preg_match(self::FRACHTBRIEF_ORDER_LABEL_PATTERN, $ocrContent) === 1,
+            'labelled_weborder_pattern_matched' => $this->hasLabelledWebOrderEvidence($ocrContent),
+            'bare_weborder_pattern_matched' =>
+                preg_match(self::FRACHTBRIEF_WEBORDER_BARE_PATTERN, $ocrContent) === 1,
+            'corroboration_matched' =>
+                preg_match(self::FRACHTBRIEF_RHENUS_CORROBORATION_PATTERN, $ocrContent) === 1,
+        ]);
     }
 
     /**
